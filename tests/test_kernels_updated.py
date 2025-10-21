@@ -10,11 +10,11 @@ from boltz.model.layers.pairformer import PairformerLayer
 
 # Try to import optimized attention
 try:
-    from boltz.model.layers.optimized_attention import OptimizedAttentionPairBias
+    from boltz.model.layers.optimized_attention import PureOptimizedAttentionPairBias
     HAS_OPTIMIZED = True
 except ImportError:
     HAS_OPTIMIZED = False
-    print("OptimizedAttentionPairBias not available")
+    print("PureOptimizedAttentionPairBias not available")
 
 # Disable auto-tuning
 os.environ["CUEQ_DEFAULT_CONFIG"] = "1"
@@ -44,7 +44,7 @@ if HAS_OPTIMIZED:
     # Replace the attention module with optimized version
     if hasattr(opt_model, 'attention'):
         # Use the same parameters as the original model
-        opt_model.attention = OptimizedAttentionPairBias(
+        opt_model.attention = PureOptimizedAttentionPairBias(
             C_S,  # Use global constant instead of instance attribute
             C_Z,  # Use global constant instead of instance attribute  
             opt_model.attention.num_heads
