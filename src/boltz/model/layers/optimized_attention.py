@@ -176,9 +176,9 @@ class OptimizedAttentionPairBias(nn.Module):
         
         # Apply mask efficiently using in-place operations where possible
         if mask is not None:
-            # Expand mask once and reuse
-            mask_expanded = mask.view(B, 1, 1, S).expand(-1, H, S, -1)
-            attn_scores = torch.where(mask_expanded, attn_scores, 
+            # Convert mask to boolean and expand once for reuse
+            mask_bool = mask.bool().view(B, 1, 1, S).expand(-1, H, S, -1)
+            attn_scores = torch.where(mask_bool, attn_scores, 
                                     torch.full_like(attn_scores, -self.inf))
         
         # Apply softmax with optimal memory pattern
