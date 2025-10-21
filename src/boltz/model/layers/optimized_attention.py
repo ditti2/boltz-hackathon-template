@@ -317,10 +317,10 @@ class OptimizedAttentionPairBias(nn.Module):
         """
         B, S, D = s.shape
         
-        # Get QKV projections directly in the format needed by cuEquivariance
-        # This avoids unnecessary reshaping
-        qkv = self.proj_qkv(s)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # Get Q, K, V projections using separate layers
+        q = self.proj_q(s)
+        k = self.proj_k(k_in)  # Use k_in for keys
+        v = self.proj_v(k_in)  # Use k_in for values
         
         # Reshape for attention
         q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D_h)
