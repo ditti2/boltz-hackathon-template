@@ -43,9 +43,10 @@ if HAS_OPTIMIZED:
     opt_model = PairformerLayer(C_S, C_Z, v2=True)
     # Replace the attention module with optimized version
     if hasattr(opt_model, 'attention'):
+        # Use the same parameters as the original model
         opt_model.attention = OptimizedAttentionPairBias(
-            opt_model.attention.c_s, 
-            opt_model.attention.c_z, 
+            C_S,  # Use global constant instead of instance attribute
+            C_Z,  # Use global constant instead of instance attribute  
             opt_model.attention.num_heads
         )
     opt_model.cuda()
