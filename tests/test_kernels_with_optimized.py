@@ -23,18 +23,29 @@ torch.set_grad_enabled(not INFERENCE)
 # Try to import optimized attention
 try:
     from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
+    from boltz.model.layers.layernorm_optimized_attention import LayerNormOptimizedAttentionPairBias, FusedAttentionPairBias
     HAS_OPTIMIZED = True
     HAS_TURBO = True
+    HAS_LAYERNORM_OPT = True
 except ImportError:
     try:
-        from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias
+        from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
         HAS_OPTIMIZED = True
-        HAS_TURBO = False
-        print("TurboOptimizedAttentionPairBias not available")
+        HAS_TURBO = True
+        HAS_LAYERNORM_OPT = False
+        print("LayerNorm optimized attention not available")
     except ImportError:
-        HAS_OPTIMIZED = False
-        HAS_TURBO = False
-        print("Optimized attention not available")
+        try:
+            from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias
+            HAS_OPTIMIZED = True
+            HAS_TURBO = False
+            HAS_LAYERNORM_OPT = False
+            print("TurboOptimizedAttentionPairBias not available")
+        except ImportError:
+            HAS_OPTIMIZED = False
+            HAS_TURBO = False
+            HAS_LAYERNORM_OPT = False
+            print("Optimized attention not available")
 
 # Preload modules
 model = PairformerLayer(C_S, C_Z, v2=True)
@@ -45,6 +56,9 @@ if INFERENCE:
 # Create optimized model with replaced attention if available
 opt_model = None
 turbo_model = None
+layernorm_model = None
+fused_model = None
+
 if HAS_OPTIMIZED:
     opt_model = PairformerLayer(C_S, C_Z, v2=True)
     # Replace the attention module with optimized version
@@ -67,9 +81,34 @@ if HAS_TURBO:
     if INFERENCE:
         turbo_model.eval()
 
+if HAS_LAYERNORM_OPT:
+    layernorm_model = PairformerLayer(C_S, C_Z, v2=True)
+    # Replace with LayerNorm optimized version
+    if hasattr(layernorm_model, 'attention'):
+        layernorm_model.attention = LayerNormOptimizedAttentionPairBias(
+            C_S, C_Z, layernorm_model.attention.num_heads
+        )
+    layernorm_model.cuda()
+    if INFERENCE:
+        layernorm_model.eval()
+        
+    fused_model = PairformerLayer(C_S, C_Z, v2=True)
+    # Replace with Fused attention version
+    if hasattr(fused_model, 'attention'):
+        fused_model.attention = FusedAttentionPairBias(
+            C_S, C_Z, fused_model.attention.num_heads
+        )
+    fused_model.cuda()
+    if INFERENCE:
+        fused_model.eval()
 
-def fwd(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False):
-    if use_turbo_attn and turbo_model is not None:
+
+def fwd(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False):
+    if use_fused_attn and fused_model is not None:
+        fused_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
+    elif use_layernorm_attn and layernorm_model is not None:
+        layernorm_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
+    elif use_turbo_attn and turbo_model is not None:
         turbo_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
     elif use_opt_attn and opt_model is not None:
         opt_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
@@ -77,8 +116,12 @@ def fwd(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=Fa
         model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
 
 
-def backward(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False):
-    if use_turbo_attn and turbo_model is not None:
+def backward(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False):
+    if use_fused_attn and fused_model is not None:
+        s, z = fused_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
+    elif use_layernorm_attn and layernorm_model is not None:
+        s, z = layernorm_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
+    elif use_turbo_attn and turbo_model is not None:
         s, z = turbo_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
     elif use_opt_attn and opt_model is not None:
         s, z = opt_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
@@ -110,17 +153,19 @@ def speed(func, its=10, warmup=10):
             "Default",
             "Trimul", 
             "HyperOptAttn",
-            "HyperOptAttn+Trimul",
             "TurboOptAttn",
-            "TurboOptAttn+Trimul",
+            "LayerNormOpt",
+            "FusedAttn",
+            "FusedAttn+Trimul",
         ],
         line_names=[
             "Default",
             "Trimul",
             "HyperOptAttn", 
-            "HyperOptAttn+Trimul",
             "TurboOptAttn",
-            "TurboOptAttn+Trimul", 
+            "LayerNormOpt",
+            "FusedAttn",
+            "FusedAttn+Trimul",
         ],
         plot_name="optimized_vs_trimul",
         args={},
@@ -185,18 +230,8 @@ def benchmark(size, provider):
                     use_cuequiv_mul=False,
                     use_opt_attn=True,
                     use_turbo_attn=False,
-                )
-            )
-        elif provider == "HyperOptAttn+Trimul":
-            if not HAS_OPTIMIZED:
-                return float('nan')
-            ms = speed(
-                lambda: fn(
-                    model, s, z, mask, pair_mask,
-                    use_cuequiv_attn=False,
-                    use_cuequiv_mul=True,
-                    use_opt_attn=True,
-                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
                 )
             )
         elif provider == "TurboOptAttn":
@@ -209,10 +244,40 @@ def benchmark(size, provider):
                     use_cuequiv_mul=False,
                     use_opt_attn=False,
                     use_turbo_attn=True,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
                 )
             )
-        elif provider == "TurboOptAttn+Trimul":
-            if not HAS_TURBO:
+        elif provider == "LayerNormOpt":
+            if not HAS_LAYERNORM_OPT:
+                return float('nan')
+            ms = speed(
+                lambda: fn(
+                    model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=False,
+                    use_cuequiv_mul=False,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=True,
+                    use_fused_attn=False,
+                )
+            )
+        elif provider == "FusedAttn":
+            if not HAS_LAYERNORM_OPT:
+                return float('nan')
+            ms = speed(
+                lambda: fn(
+                    model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=False,
+                    use_cuequiv_mul=False,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=True,
+                )
+            )
+        elif provider == "FusedAttn+Trimul":
+            if not HAS_LAYERNORM_OPT:
                 return float('nan')
             ms = speed(
                 lambda: fn(
@@ -220,7 +285,9 @@ def benchmark(size, provider):
                     use_cuequiv_attn=False,
                     use_cuequiv_mul=True,
                     use_opt_attn=False,
-                    use_turbo_attn=True,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=True,
                 )
             )
 
@@ -228,5 +295,5 @@ def benchmark(size, provider):
 
 
 if __name__ == "__main__":
-    print("Speed comparison: Turbo & Hyper-Optimized Attention vs Trimul")
+    print("Speed comparison: LayerNorm + Fused Attention Optimizations vs Trimul")
     benchmark.run(print_data=True, show_plots=False)
