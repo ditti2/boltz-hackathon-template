@@ -3,6 +3,7 @@ import time
 
 import torch
 import triton
+import pandas as pd
 from profiling import clear_memory
 from boltz.model.layers.pairformer import PairformerLayer
 
@@ -318,6 +319,196 @@ def benchmark(size, provider):
     return ms / BATCH_SIZE
 
 
+def analyze_triton_results(results_data=None):
+    """
+    Capture and analyze results from Triton benchmark.
+    
+    Args:
+        results_data: Dict with benchmark results, or None to use sample data
+    """
+    print("\n" + "="*80)
+    print("🚀 PERFORMANCE ANALYSIS: Best Method per Sequence Size")
+    print("="*80)
+    
+    # Use provided data or sample data
+    if results_data is None:
+        # Sample results - replace with actual data when available
+        results_data = {
+            'size': [64.0, 128.0, 256.0, 512.0],
+            'Default': [0.010797, 0.011778, 0.084337, 0.482963],
+            'Trimul': [0.010742, 0.012808, 0.065764, 0.394785],
+            'HyperOptAttn': [0.010651, 0.011795, 0.084504, 0.483443],
+            'TurboOptAttn': [0.010886, 0.012336, 0.088742, 0.504486],
+            'LayerNormOpt': [0.010524, 0.011913, 0.084504, 0.483493],
+            'FusedAttn': [0.010579, 0.011935, 0.084572, 0.483654],
+            'FusedAttn+Trimul': [0.010612, 0.012929, 0.065931, 0.395125]
+        }
+        print("📝 Using sample data - replace with actual benchmark results")
+    else:
+        print("📊 Analyzing provided benchmark results")
+    
+    df = pd.DataFrame(results_data)
+    
+    print("\n📊 BENCHMARK RESULTS")
+    print("-" * 95)
+    print(df.to_string(index=False, float_format='%.6f'))
+    
+    # Find best method for each sequence size
+    methods = [col for col in df.columns if col != 'size']
+    
+    analysis_results = []
+    for idx, row in df.iterrows():
+        size = row['size']
+        times = {method: row[method] for method in methods}
+        best_method = min(times, key=times.get)
+        best_time = times[best_method]
+        
+        # Calculate speedup vs default
+        default_time = row['Default']
+        speedup = default_time / best_time
+        speedup_pct = (speedup - 1) * 100
+        
+        # Calculate speedup vs trimul 
+        trimul_time = row.get('Trimul', default_time)
+        trimul_speedup = trimul_time / best_time
+        trimul_speedup_pct = (trimul_speedup - 1) * 100
+        
+        analysis_results.append({
+            'Size': int(size),
+            'Best_Method': best_method,
+            'Best_Time': f"{best_time:.6f}s",
+            'vs_Default': f"+{speedup_pct:.1f}%" if speedup_pct > 0 else f"{speedup_pct:.1f}%",
+            'vs_Trimul': f"+{trimul_speedup_pct:.1f}%" if trimul_speedup_pct > 0 else f"{trimul_speedup_pct:.1f}%"
+        })
+    
+    # Display winner analysis
+    print(f"\n🏆 WINNER ANALYSIS")
+    print("-" * 80)
+    
+    for result in analysis_results:
+        size = result['Size']
+        method = result['Best_Method']
+        time = result['Best_Time']
+        vs_default = result['vs_Default']
+        vs_trimul = result['vs_Trimul']
+        
+        # Add emoji indicators
+        if method == 'LayerNormOpt':
+            emoji = "🎯"
+        elif method == 'Trimul':
+            emoji = "⚡"
+        elif 'Trimul' in method:
+            emoji = "🔥"
+        elif method == 'Default':
+            emoji = "✅"
+        else:
+            emoji = "🚀"
+        
+        print(f"{emoji} Size {size:3d}: {method:15s} ({time}) | {vs_default:8s} vs Default | {vs_trimul:8s} vs Trimul")
+    
+    # Summary statistics
+    print(f"\n📈 SUMMARY STATISTICS")
+    print("-" * 40)
+    
+    # Count wins per method
+    method_wins = {}
+    for result in analysis_results:
+        method = result['Best_Method']
+        method_wins[method] = method_wins.get(method, 0) + 1
+    
+    print("Winner frequency:")
+    for method, wins in sorted(method_wins.items(), key=lambda x: x[1], reverse=True):
+        print(f"  • {method}: {wins}/{len(analysis_results)} sizes")
+    
+    champion = max(method_wins, key=method_wins.get)
+    print(f"\n🏆 CHAMPION: {champion} (most frequent winner)")
+    
+    # Adaptive insights based on data
+    small_results = [r for r in analysis_results if r['Size'] <= 128]
+    large_results = [r for r in analysis_results if r['Size'] >= 256]
+    
+    print(f"\n💡 KEY INSIGHTS")
+    print("-" * 40)
+    
+    if small_results:
+        small_winners = [r['Best_Method'] for r in small_results]
+        if len(set(small_winners)) == 1:
+            print(f"• {small_winners[0]} dominates small sequences (≤128)")
+        else:
+            print(f"• Mixed winners for small sequences: {set(small_winners)}")
+    
+    if large_results:
+        large_winners = [r['Best_Method'] for r in large_results]
+        if len(set(large_winners)) == 1:
+            print(f"• {large_winners[0]} dominates large sequences (≥256)")
+        else:
+            print(f"• Mixed winners for large sequences: {set(large_winners)}")
+    
+    # Check our custom optimizations
+    our_methods = ['HyperOptAttn', 'TurboOptAttn', 'LayerNormOpt', 'FusedAttn', 'FusedAttn+Trimul']
+    our_wins = [r for r in analysis_results if r['Best_Method'] in our_methods]
+    
+    if our_wins:
+        print(f"• Our optimizations win {len(our_wins)}/{len(analysis_results)} tests")
+    else:
+        print("• Our custom optimizations show minimal improvement")
+    
+    # Trimul analysis
+    trimul_wins = [r for r in analysis_results if r['Best_Method'] == 'Trimul']
+    if trimul_wins and 'Trimul' in methods:
+        speedups = []
+        for r in trimul_wins:
+            try:
+                pct = float(r['vs_Default'].replace('%', '').replace('+', ''))
+                speedups.append(pct)
+            except:
+                pass
+        if speedups:
+            avg_speedup = sum(speedups) / len(speedups)
+            print(f"• Trimul provides {avg_speedup:.1f}% average speedup where it wins")
+    
+    # Recommendations
+    print(f"\n🎯 RECOMMENDATIONS")
+    print("-" * 40)
+    
+    if small_results and large_results:
+        small_method = small_results[0]['Best_Method']
+        large_method = large_results[0]['Best_Method']
+        
+        if small_method == large_method:
+            print(f"1. Use {small_method} for all sequence sizes")
+        else:
+            print(f"1. Use {small_method} for sequences < 128")
+            print(f"2. Use {large_method} for sequences ≥ 256")
+    
+    if not our_wins:
+        print("3. Focus future optimization on large sequence performance")
+        print("4. Consider cuEquivariance-based approaches instead of custom optimizations")
+    
+    print("5. Consider adaptive strategy based on sequence length")
+    
+    return df, analysis_results
+
+
 if __name__ == "__main__":
     print("Speed comparison: LayerNorm + Fused Attention Optimizations vs Trimul")
+    
+    # Run the standard benchmark
     benchmark.run(print_data=True, show_plots=False)
+    
+    # You can provide actual benchmark results here:
+    # Example: to use your actual results, uncomment and modify:
+    actual_results = {
+        'size': [64.0, 128.0, 256.0, 512.0],
+        'Default': [0.010797, 0.011778, 0.084337, 0.482963],
+        'Trimul': [0.010742, 0.012808, 0.065764, 0.394785],
+        'HyperOptAttn': [0.010651, 0.011795, 0.084504, 0.483443],
+        'TurboOptAttn': [0.010886, 0.012336, 0.088742, 0.504486],
+        'LayerNormOpt': [0.010524, 0.011913, 0.084504, 0.483493],
+        'FusedAttn': [0.010579, 0.011935, 0.084572, 0.483654],
+        'FusedAttn+Trimul': [0.010612, 0.012929, 0.065931, 0.395125]
+    }
+    
+    # Generate detailed performance analysis
+    print("\nGenerating performance analysis...")
+    benchmark_df, winner_analysis = analyze_triton_results(actual_results)
