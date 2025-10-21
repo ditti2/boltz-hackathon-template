@@ -160,6 +160,7 @@ class OptimizedAttentionPairBias(nn.Module):
         q = q.transpose(1, 2).contiguous()  # (B, H, S, D_h)
         k = k.transpose(1, 2).contiguous()  # (B, H, S, D_h)
         v = v.transpose(1, 2).contiguous()  # (B, H, S, D_h)
+        z_bias = z_bias.contiguous()        # (B, H, S, S)
         
         # Use optimized GEMM operations
         # Scale is applied during matmul to avoid separate scaling step
@@ -168,9 +169,9 @@ class OptimizedAttentionPairBias(nn.Module):
         # Compute attention scores with optimal batching
         # Use baddbmm for fused multiply-add operation
         attn_scores = torch.baddbmm(
-            z_bias.view(B * H, S, S),  # bias
-            q.view(B * H, S, D_h),     # batch1
-            scaled_k.view(B * H, D_h, S),  # batch2 (transposed)
+            z_bias.view(B * H, S, S),       # bias
+            q.view(B * H, S, D_h),          # batch1
+            scaled_k.view(B * H, D_h, S),   # batch2 (transposed)
             beta=1.0, alpha=1.0
         ).view(B, H, S, S)
         
