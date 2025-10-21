@@ -6,7 +6,7 @@ from profiling import clear_memory
 
 # Set hyperparameters for attention-only test
 PRECISION = torch.bfloat16
-device = "cuda:0"
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def speed(func, its=10, warmup=10):
     for _ in range(warmup):
@@ -55,7 +55,14 @@ def benchmark_attention_only():
     print(f"{'-'*8} {'-'*8} {'-'*15} {'-'*12} {'-'*10}")
     
     for seq_len, batch_size in configs:
-        clear_memory(device)
+        # Clear memory safely
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                clear_memory(device)
+            except RuntimeError:
+                # Fallback if clear_memory fails
+                torch.cuda.empty_cache()
         
         # Create test data
         s = torch.randn((batch_size, seq_len, c_s), device=device, dtype=PRECISION)
