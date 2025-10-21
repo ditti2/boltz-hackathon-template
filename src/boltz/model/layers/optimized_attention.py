@@ -244,9 +244,9 @@ class OptimizedAttentionPairBias(nn.Module):
             # Default: use the input s as keys
             k_in = s
             
-        # If cuEquivariance is available, use it more aggressively
-        # The TriAttn+Trimul combination shows it's effective even for smaller sequences
-        if HAS_CUEQUIVARIANCE and S >= 64:  # Lowered threshold from 128 to 64
+        # Use cuEquivariance smartly - avoid overhead for smaller sequences  
+        # Focus on PyTorch optimizations where cuEquivariance has overhead
+        if HAS_CUEQUIVARIANCE and S >= 256:  # Raised threshold back up
             return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
         
         # Otherwise use our optimized PyTorch implementation
@@ -427,10 +427,10 @@ def create_optimized_attention(
     return OptimizedAttentionPairBias(c_s, c_z, num_heads, inf, initial_norm)
 
 
-class UltraOptimizedAttentionPairBias(OptimizedAttentionPairBias):
+class PureOptimizedAttentionPairBias(OptimizedAttentionPairBias):
     """
-    Ultra-aggressive optimization that mimics TriAttn+Trimul performance.
-    Uses cuEquivariance for all sequence lengths and optimizes fallback path.
+    Pure PyTorch optimization that avoids cuEquivariance overhead entirely.
+    Focuses only on memory and compute optimizations that work for all sequence lengths.
     """
     
     def forward(self, s, z, mask, multiplicity=1, to_keys=None, 
@@ -450,25 +450,28 @@ class UltraOptimizedAttentionPairBias(OptimizedAttentionPairBias):
         else:
             k_in = s
             
-        # Use cuEquivariance aggressively (like TriAttn+Trimul does)
-        # Lower threshold to match TriAttn+Trimul behavior
-        if HAS_CUEQUIVARIANCE and S >= 32:
-            return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
+        # Skip cuEquivariance entirely - use pure PyTorch optimizations
+        # This ensures we get consistent speedups without kernel overhead
         
-        # Ultra-optimized PyTorch fallback
+        # Optimized projections with memory-efficient operations
         q = self.proj_q(s)
         k = self.proj_k(k_in)
         v = self.proj_v(k_in)
         
-        q = q.view(B, S, self.num_heads, self.head_dim)
-        k = k.view(B, S, self.num_heads, self.head_dim) 
-        v = v.view(B, S, self.num_heads, self.head_dim)
+        # Efficient reshaping - ensure contiguous memory layout
+        q = q.view(B, S, self.num_heads, self.head_dim).contiguous()
+        k = k.view(B, S, self.num_heads, self.head_dim).contiguous()
+        v = v.view(B, S, self.num_heads, self.head_dim).contiguous()
         
+        # Process z efficiently
         z_bias = self._process_z(z, model_cache)
-        z_bias = z_bias.repeat_interleave(multiplicity, 0) if multiplicity > 1 else z_bias
+        if multiplicity > 1:
+            z_bias = z_bias.repeat_interleave(multiplicity, 0)
         
+        # Gating
         g = self.proj_g(s).sigmoid()
         
+        # Handle multiplicity
         if multiplicity > 1:
             q = q.repeat_interleave(multiplicity, 0)
             k = k.repeat_interleave(multiplicity, 0)
@@ -476,9 +479,82 @@ class UltraOptimizedAttentionPairBias(OptimizedAttentionPairBias):
             mask = mask.repeat_interleave(multiplicity, 0)
             g = g.repeat_interleave(multiplicity, 0)
         
+        # Ultra-optimized attention computation
         attn_output = self._memory_efficient_attention(q, k, v, z_bias, mask)
+        
+        # Output projection
         output = self.proj_o(g * attn_output)
         
+        if multiplicity > 1:
+            output = output.view(multiplicity, B, S, -1).mean(0)
+            
+        return output
+
+
+class UltraOptimizedAttentionPairBias(OptimizedAttentionPairBias):
+    """
+    Smart optimization that uses cuEquivariance only when beneficial.
+    Focuses on PyTorch optimizations for smaller sequences where cuEquivariance has overhead.
+    """
+    
+    def forward(self, s, z, mask, multiplicity=1, to_keys=None, 
+               model_cache=None, k_in=None):
+        B, S, D = s.shape
+        
+        # Apply layer norm if configured
+        if self.initial_norm:
+            s = self.norm_s(s)
+            
+        # Handle key input
+        if k_in is not None:
+            pass
+        elif to_keys is not None:
+            k_in = to_keys(s)
+            mask = to_keys(mask.unsqueeze(-1)).squeeze(-1)
+        else:
+            k_in = s
+            
+        # Use cuEquivariance only for larger sequences where it's beneficial
+        # Based on TriAttn+Trimul analysis: avoid cuEquivariance overhead for small sequences
+        if HAS_CUEQUIVARIANCE and S >= 256:  # Conservative threshold
+            return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
+        
+        # Focus on ultra-optimized PyTorch for small-medium sequences
+        # This is where we need to beat the original implementation
+        
+        # Optimized projections with better memory patterns
+        q = self.proj_q(s)
+        k = self.proj_k(k_in)
+        v = self.proj_v(k_in)
+        
+        # Efficient reshaping and contiguous memory layout
+        q = q.view(B, S, self.num_heads, self.head_dim).contiguous()
+        k = k.view(B, S, self.num_heads, self.head_dim).contiguous()
+        v = v.view(B, S, self.num_heads, self.head_dim).contiguous()
+        
+        # Process z with caching and optimization
+        z_bias = self._process_z(z, model_cache)
+        if multiplicity > 1:
+            z_bias = z_bias.repeat_interleave(multiplicity, 0)
+        
+        # Optimized gating computation
+        g = self.proj_g(s).sigmoid()
+        
+        # Handle multiplicity efficiently
+        if multiplicity > 1:
+            q = q.repeat_interleave(multiplicity, 0)
+            k = k.repeat_interleave(multiplicity, 0)
+            v = v.repeat_interleave(multiplicity, 0)
+            mask = mask.repeat_interleave(multiplicity, 0)
+            g = g.repeat_interleave(multiplicity, 0)
+        
+        # Use the ultra-optimized attention computation
+        attn_output = self._memory_efficient_attention(q, k, v, z_bias, mask)
+        
+        # Optimized output projection with gating
+        output = self.proj_o(g * attn_output)
+        
+        # Handle multiplicity output averaging
         if multiplicity > 1:
             output = output.view(multiplicity, B, S, -1).mean(0)
             
