@@ -299,6 +299,7 @@ def run_benchmark(
     
     results = []
     reference_output = None
+    boltz_model = None  # Initialize to avoid reference errors
     
     # 1. Benchmark Boltz implementation
     print(f"Testing Boltz AttentionPairBias...")
@@ -326,9 +327,20 @@ def run_benchmark(
         
     except Exception as e:
         print(f"  ✗ Error testing Boltz implementation: {e}")
+        # Add a placeholder result to avoid issues in summary
+        results.append({
+            "seq_len": seq_len,
+            "batch_size": batch_size,
+            "model": "boltz",
+            "time_ms": float('nan'),
+            "time_std_ms": float('nan'),
+            "mem_used_gb": float('nan'),
+            "max_diff": float('nan'),
+            "relative_diff": float('nan')
+        })
     
     # 2. Benchmark cuEquivariance implementation (if available)
-    if HAS_CUEQUIVARIANCE and HAS_CUEQ_TEST:
+    if HAS_CUEQUIVARIANCE and HAS_CUEQ_TEST and boltz_model is not None:
         print(f"Testing cuEquivariance AttentionPairBias...")
         try:
             cueq_model = CuEquivAttentionPairBias(c_s, c_z, num_heads).to(device)
@@ -353,16 +365,27 @@ def run_benchmark(
             print(f"  ✓ cuEquivariance: {cueq_result['time_ms']:.2f} ± {cueq_result['time_std_ms']:.2f} ms")
             print(f"    - Max difference: {cueq_result['max_diff']:.6f}")
             print(f"    - Memory used: {cueq_result['mem_used_gb']:.2f} GB")
-            if reference_output is not None:
+            if reference_output is not None and 'boltz_result' in locals():
                 print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/cueq_result['time_ms']:.2f}x")
                 
         except Exception as e:
             print(f"  ✗ Error testing cuEquivariance implementation: {e}")
             import traceback
             traceback.print_exc()
+            # Add a placeholder result to avoid issues in summary
+            results.append({
+                "seq_len": seq_len,
+                "batch_size": batch_size,
+                "model": "cuequivariance",
+                "time_ms": float('nan'),
+                "time_std_ms": float('nan'),
+                "mem_used_gb": float('nan'),
+                "max_diff": float('nan'),
+                "relative_diff": float('nan')
+            })
     
     # 3. Benchmark optimized implementation
-    if HAS_OPTIMIZED:
+    if HAS_OPTIMIZED and boltz_model is not None:
         print(f"Testing Optimized AttentionPairBias...")
         try:
             opt_model = OptimizedAttentionPairBias(c_s, c_z, num_heads).to(device)
@@ -387,7 +410,7 @@ def run_benchmark(
             print(f"  ✓ Optimized: {opt_result['time_ms']:.2f} ± {opt_result['time_std_ms']:.2f} ms")
             print(f"    - Max difference: {opt_result['max_diff']:.6f}")
             print(f"    - Memory used: {opt_result['mem_used_gb']:.2f} GB")
-            if reference_output is not None:
+            if reference_output is not None and 'boltz_result' in locals():
                 print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/opt_result['time_ms']:.2f}x")
             
             if 'cueq_result' in locals():
@@ -397,6 +420,17 @@ def run_benchmark(
             print(f"  ✗ Error testing optimized implementation: {e}")
             import traceback
             traceback.print_exc()
+            # Add a placeholder result to avoid issues in summary
+            results.append({
+                "seq_len": seq_len,
+                "batch_size": batch_size,
+                "model": "optimized",
+                "time_ms": float('nan'),
+                "time_std_ms": float('nan'),
+                "mem_used_gb": float('nan'),
+                "max_diff": float('nan'),
+                "relative_diff": float('nan')
+            })
     
     return results
 
@@ -479,11 +513,17 @@ def run_multiple_benchmarks(
         boltz_time = models['boltz']['time_ms'] if 'boltz' in models else None
         
         for model_name, result in sorted(models.items()):
-            speedup = boltz_time / result['time_ms'] if boltz_time else 1.0
+            speedup = boltz_time / result['time_ms'] if boltz_time and result.get('time_ms') else 1.0
             max_diff = result.get('max_diff', float('nan'))
             
-            print(f"{seq_len:8d} {batch_size:8d} {model_name:15} "
-                  f"{result['time_ms']:12.2f} {result['mem_used_gb']:12.2f} "
+            # Use values from key instead of result to avoid None values
+            result_seq_len = result.get('seq_len', seq_len) or seq_len
+            result_batch_size = result.get('batch_size', batch_size) or batch_size
+            time_ms = result.get('time_ms', float('nan'))
+            mem_used_gb = result.get('mem_used_gb', float('nan'))
+            
+            print(f"{result_seq_len:8d} {result_batch_size:8d} {model_name:15} "
+                  f"{time_ms:12.2f} {mem_used_gb:12.2f} "
                   f"{max_diff:12.6f} {speedup:10.2f}x")
     
     return all_results
