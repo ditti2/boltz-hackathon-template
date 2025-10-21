@@ -77,21 +77,21 @@ def memory_stats():
 
 def copy_weights_optimized(target_model, source_model):
     """Copy weights from Boltz model to optimized model."""
-    # Handle QKV projection weights
-    if hasattr(target_model, "proj_qkv") and hasattr(source_model, "proj_q"):
-        q_weight = source_model.proj_q.weight
-        k_weight = source_model.proj_k.weight
-        v_weight = source_model.proj_v.weight
-        
-        # Concatenate along output dimension for QKV fusion
-        qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=0)
-        target_model.proj_qkv.weight.data.copy_(qkv_weight)
-        
+    # Handle Q, K, V projection weights (now using separate projections)
+    if hasattr(target_model, "proj_q") and hasattr(source_model, "proj_q"):
+        target_model.proj_q.weight.data.copy_(source_model.proj_q.weight.data)
         if source_model.proj_q.bias is not None:
-            q_bias = source_model.proj_q.bias
-            # Assuming k and v don't have bias in Boltz implementation
-            qkv_bias = torch.cat([q_bias, torch.zeros_like(q_bias), torch.zeros_like(q_bias)])
-            target_model.proj_qkv.bias.data.copy_(qkv_bias)
+            target_model.proj_q.bias.data.copy_(source_model.proj_q.bias.data)
+    
+    if hasattr(target_model, "proj_k") and hasattr(source_model, "proj_k"):
+        target_model.proj_k.weight.data.copy_(source_model.proj_k.weight.data)
+        if hasattr(source_model.proj_k, "bias") and source_model.proj_k.bias is not None:
+            target_model.proj_k.bias.data.copy_(source_model.proj_k.bias.data)
+    
+    if hasattr(target_model, "proj_v") and hasattr(source_model, "proj_v"):
+        target_model.proj_v.weight.data.copy_(source_model.proj_v.weight.data)
+        if hasattr(source_model.proj_v, "bias") and source_model.proj_v.bias is not None:
+            target_model.proj_v.bias.data.copy_(source_model.proj_v.bias.data)
     
     # Gating projection
     if hasattr(target_model, "proj_g") and hasattr(source_model, "proj_g"):
