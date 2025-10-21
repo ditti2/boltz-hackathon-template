@@ -509,6 +509,10 @@ def run_multiple_benchmarks(
         seq_len, batch_size = key
         models = configs[key]
         
+        # Ensure seq_len and batch_size are never None
+        seq_len = seq_len if seq_len is not None else 0
+        batch_size = batch_size if batch_size is not None else 0
+        
         # Get Boltz baseline
         boltz_time = models['boltz']['time_ms'] if 'boltz' in models else None
         
@@ -516,17 +520,30 @@ def run_multiple_benchmarks(
             speedup = boltz_time / result['time_ms'] if boltz_time and result.get('time_ms') else 1.0
             max_diff = result.get('max_diff', float('nan'))
             
-            # Ensure we have valid values, use defaults if needed
-            result_seq_len = result.get('seq_len')
+            # Ensure we have valid integer values, never None
+            result_seq_len = result.get('seq_len', seq_len)
             if result_seq_len is None:
-                result_seq_len = seq_len if seq_len is not None else 0
+                result_seq_len = 0
                 
-            result_batch_size = result.get('batch_size')
+            result_batch_size = result.get('batch_size', batch_size)
             if result_batch_size is None:
-                result_batch_size = batch_size if batch_size is not None else 0
+                result_batch_size = 0
                 
-            time_ms = result.get('time_ms', float('nan'))
-            mem_used_gb = result.get('mem_used_gb', float('nan'))
+            time_ms = result.get('time_ms')
+            if time_ms is None:
+                time_ms = float('nan')
+                
+            mem_used_gb = result.get('mem_used_gb')
+            if mem_used_gb is None:
+                mem_used_gb = float('nan')
+            
+            # Convert to ensure proper types for formatting
+            result_seq_len = int(result_seq_len) if result_seq_len is not None else 0
+            result_batch_size = int(result_batch_size) if result_batch_size is not None else 0
+            time_ms = float(time_ms) if time_ms is not None else float('nan')
+            mem_used_gb = float(mem_used_gb) if mem_used_gb is not None else float('nan')
+            max_diff = float(max_diff) if max_diff is not None else float('nan')
+            speedup = float(speedup) if speedup is not None else 1.0
             
             print(f"{result_seq_len:8d} {result_batch_size:8d} {model_name:15} "
                   f"{time_ms:12.2f} {mem_used_gb:12.2f} "
