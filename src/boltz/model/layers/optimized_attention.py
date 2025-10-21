@@ -94,9 +94,6 @@ class OptimizedAttentionPairBias(nn.Module):
         
         # Output projection
         self.proj_o = nn.Linear(c_s, c_s, bias=False)
-        
-        # Cached tensors for efficient memory usage
-        self.cached_tensors = {}
 
     def _process_z(
         self, 
@@ -403,8 +400,5 @@ def create_optimized_attention(
     nn.Module
         Optimized implementation of attention
     """
-    # Import here to avoid circular imports
-    from boltz.model.layers.attention import AttentionPairBias as OriginalAttentionPairBias
-    
     # Always use our optimized implementation as it includes fallback
     return OptimizedAttentionPairBias(c_s, c_z, num_heads, inf, initial_norm)

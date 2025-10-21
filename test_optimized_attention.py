@@ -40,10 +40,23 @@ sys.path.append('./src')
 
 # Import attention implementations
 from boltz.model.layers.attention import AttentionPairBias as BoltzAttentionPairBias
-from boltz.model.layers.optimized_attention import OptimizedAttentionPairBias
+
+try:
+    from boltz.model.layers.optimized_attention import OptimizedAttentionPairBias
+    HAS_OPTIMIZED = True
+    print("✓ OptimizedAttentionPairBias is available")
+except ImportError:
+    HAS_OPTIMIZED = False
+    print("✗ OptimizedAttentionPairBias is not available")
 
 if HAS_CUEQUIVARIANCE:
-    from test_attention_pair_bias_integration import CuEquivAttentionPairBias
+    try:
+        from test_attention_pair_bias_integration import CuEquivAttentionPairBias
+        HAS_CUEQ_TEST = True
+        print("✓ CuEquivAttentionPairBias test is available")
+    except ImportError:
+        HAS_CUEQ_TEST = False
+        print("✗ CuEquivAttentionPairBias test is not available")
 
 
 def memory_stats():
@@ -133,6 +146,8 @@ def benchmark_model(
     s,
     z,
     mask,
+    seq_len,
+    batch_size,
     iterations=10,
     warmup=3,
     fp16=False,
@@ -149,6 +164,10 @@ def benchmark_model(
         Model to benchmark
     s, z, mask : torch.Tensor
         Input tensors
+    seq_len : int
+        Sequence length for tracking
+    batch_size : int
+        Batch size for tracking
     iterations : int
         Number of benchmark iterations
     warmup : int
@@ -213,6 +232,8 @@ def benchmark_model(
         relative_diff = max_diff / (torch.max(torch.abs(reference_output)).item() + 1e-9)
     
     return {
+        "seq_len": seq_len,
+        "batch_size": batch_size,
         "model": model_name,
         "time_ms": mean_time * 1000,
         "time_std_ms": std_time * 1000,
@@ -281,76 +302,101 @@ def run_benchmark(
     
     # 1. Benchmark Boltz implementation
     print(f"Testing Boltz AttentionPairBias...")
-    boltz_model = BoltzAttentionPairBias(c_s, c_z, num_heads).to(device)
-    
-    boltz_result = benchmark_model(
-        model_name="boltz",
-        model=boltz_model,
-        s=s,
-        z=z,
-        mask=mask,
-        iterations=iterations,
-        warmup=warmup,
-        fp16=fp16
-    )
-    
-    reference_output = boltz_result["output"]
-    results.append(boltz_result)
-    
-    print(f"  ✓ Boltz: {boltz_result['time_ms']:.2f} ± {boltz_result['time_std_ms']:.2f} ms")
-    print(f"    - Memory used: {boltz_result['mem_used_gb']:.2f} GB")
-    
-    # 2. Benchmark cuEquivariance implementation (if available)
-    if HAS_CUEQUIVARIANCE:
-        print(f"Testing cuEquivariance AttentionPairBias...")
-        cueq_model = CuEquivAttentionPairBias(c_s, c_z, num_heads).to(device)
-        copy_weights_cuequiv(cueq_model, boltz_model)
+    try:
+        boltz_model = BoltzAttentionPairBias(c_s, c_z, num_heads).to(device)
         
-        cueq_result = benchmark_model(
-            model_name="cuequivariance",
-            model=cueq_model,
+        boltz_result = benchmark_model(
+            model_name="boltz",
+            model=boltz_model,
             s=s,
             z=z,
             mask=mask,
+            seq_len=seq_len,
+            batch_size=batch_size,
             iterations=iterations,
             warmup=warmup,
-            fp16=fp16,
-            reference_output=reference_output
+            fp16=fp16
         )
         
-        results.append(cueq_result)
+        reference_output = boltz_result["output"]
+        results.append(boltz_result)
         
-        print(f"  ✓ cuEquivariance: {cueq_result['time_ms']:.2f} ± {cueq_result['time_std_ms']:.2f} ms")
-        print(f"    - Max difference: {cueq_result['max_diff']:.6f}")
-        print(f"    - Memory used: {cueq_result['mem_used_gb']:.2f} GB")
-        print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/cueq_result['time_ms']:.2f}x")
+        print(f"  ✓ Boltz: {boltz_result['time_ms']:.2f} ± {boltz_result['time_std_ms']:.2f} ms")
+        print(f"    - Memory used: {boltz_result['mem_used_gb']:.2f} GB")
+        
+    except Exception as e:
+        print(f"  ✗ Error testing Boltz implementation: {e}")
+    
+    # 2. Benchmark cuEquivariance implementation (if available)
+    if HAS_CUEQUIVARIANCE and HAS_CUEQ_TEST:
+        print(f"Testing cuEquivariance AttentionPairBias...")
+        try:
+            cueq_model = CuEquivAttentionPairBias(c_s, c_z, num_heads).to(device)
+            copy_weights_cuequiv(cueq_model, boltz_model)
+            
+            cueq_result = benchmark_model(
+                model_name="cuequivariance",
+                model=cueq_model,
+                s=s,
+                z=z,
+                mask=mask,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                iterations=iterations,
+                warmup=warmup,
+                fp16=fp16,
+                reference_output=reference_output
+            )
+            
+            results.append(cueq_result)
+            
+            print(f"  ✓ cuEquivariance: {cueq_result['time_ms']:.2f} ± {cueq_result['time_std_ms']:.2f} ms")
+            print(f"    - Max difference: {cueq_result['max_diff']:.6f}")
+            print(f"    - Memory used: {cueq_result['mem_used_gb']:.2f} GB")
+            if reference_output is not None:
+                print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/cueq_result['time_ms']:.2f}x")
+                
+        except Exception as e:
+            print(f"  ✗ Error testing cuEquivariance implementation: {e}")
+            import traceback
+            traceback.print_exc()
     
     # 3. Benchmark optimized implementation
-    print(f"Testing Optimized AttentionPairBias...")
-    opt_model = OptimizedAttentionPairBias(c_s, c_z, num_heads).to(device)
-    copy_weights_optimized(opt_model, boltz_model)
-    
-    opt_result = benchmark_model(
-        model_name="optimized",
-        model=opt_model,
-        s=s,
-        z=z,
-        mask=mask,
-        iterations=iterations,
-        warmup=warmup,
-        fp16=fp16,
-        reference_output=reference_output
-    )
-    
-    results.append(opt_result)
-    
-    print(f"  ✓ Optimized: {opt_result['time_ms']:.2f} ± {opt_result['time_std_ms']:.2f} ms")
-    print(f"    - Max difference: {opt_result['max_diff']:.6f}")
-    print(f"    - Memory used: {opt_result['mem_used_gb']:.2f} GB")
-    print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/opt_result['time_ms']:.2f}x")
-    
-    if HAS_CUEQUIVARIANCE:
-        print(f"    - Speedup vs cuEquivariance: {cueq_result['time_ms']/opt_result['time_ms']:.2f}x")
+    if HAS_OPTIMIZED:
+        print(f"Testing Optimized AttentionPairBias...")
+        try:
+            opt_model = OptimizedAttentionPairBias(c_s, c_z, num_heads).to(device)
+            copy_weights_optimized(opt_model, boltz_model)
+            
+            opt_result = benchmark_model(
+                model_name="optimized",
+                model=opt_model,
+                s=s,
+                z=z,
+                mask=mask,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                iterations=iterations,
+                warmup=warmup,
+                fp16=fp16,
+                reference_output=reference_output
+            )
+            
+            results.append(opt_result)
+            
+            print(f"  ✓ Optimized: {opt_result['time_ms']:.2f} ± {opt_result['time_std_ms']:.2f} ms")
+            print(f"    - Max difference: {opt_result['max_diff']:.6f}")
+            print(f"    - Memory used: {opt_result['mem_used_gb']:.2f} GB")
+            if reference_output is not None:
+                print(f"    - Speedup vs Boltz: {boltz_result['time_ms']/opt_result['time_ms']:.2f}x")
+            
+            if 'cueq_result' in locals():
+                print(f"    - Speedup vs cuEquivariance: {cueq_result['time_ms']/opt_result['time_ms']:.2f}x")
+                
+        except Exception as e:
+            print(f"  ✗ Error testing optimized implementation: {e}")
+            import traceback
+            traceback.print_exc()
     
     return results
 
@@ -419,14 +465,14 @@ def run_multiple_benchmarks(
     # Group results by configuration
     configs = {}
     for r in all_results:
-        key = f"{r['seq_len']}_{r['batch_size']}"
+        key = (r['seq_len'], r['batch_size'])
         if key not in configs:
             configs[key] = {}
         configs[key][r['model']] = r
     
     # Sort by sequence length and batch size
     for key in sorted(configs.keys()):
-        seq_len, batch_size = map(int, key.split('_'))
+        seq_len, batch_size = key
         models = configs[key]
         
         # Get Boltz baseline
@@ -472,6 +518,7 @@ def main():
     
     print(f"✓ cuEquivariance available: {HAS_CUEQUIVARIANCE}")
     print(f"✓ APEX FusedLayerNorm available: {HAS_APEX}")
+    print(f"✓ OptimizedAttentionPairBias available: {HAS_OPTIMIZED}")
     print(f"✓ Running with precision: {('FP16' if args.fp16 else 'FP32')}")
     
     # Run benchmarks
