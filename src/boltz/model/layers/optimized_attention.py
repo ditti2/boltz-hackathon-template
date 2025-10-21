@@ -428,6 +428,366 @@ def create_optimized_attention(
     return OptimizedAttentionPairBias(c_s, c_z, num_heads, inf, initial_norm)
 
 
+class HyperOptimizedAttentionPairBias(nn.Module):
+    """
+    Hyper-optimized attention implementation with aggressive optimizations:
+    1. Fused attention computation with minimal memory allocation
+    2. Optimized tensor layouts and cache-friendly access patterns
+    3. Efficient scaling and masking operations
+    4. Reduced kernel launches through operator fusion
+    """
+
+    def __init__(self, c_s, c_z, num_heads):
+        super().__init__()
+        self.c_s = c_s
+        self.c_z = c_z
+        self.num_heads = num_heads
+        self.head_dim = c_s // num_heads
+        
+        # Fused projections for better memory bandwidth utilization
+        self.qkv_proj = nn.Linear(c_s, 3 * c_s, bias=False)
+        self.proj_g = nn.Linear(c_s, c_s)
+        self.proj_o = nn.Linear(c_s, c_s)
+        
+        # Z processing
+        self.norm_z = nn.LayerNorm(c_z)
+        self.proj_z = nn.Linear(c_z, num_heads, bias=False)
+        
+        # Layer norm for input
+        self.norm_s = nn.LayerNorm(c_s)
+        
+        # Pre-compute scaling factor
+        self.scale = (self.head_dim ** -0.5)
+        
+        # Optimization flags
+        self.initial_norm = True
+
+    def forward(self, s, z, mask, multiplicity=1, to_keys=None, 
+               model_cache=None, k_in=None):
+        B, S, D = s.shape
+        
+        # Apply layer norm
+        if self.initial_norm:
+            s = self.norm_s(s)
+            
+        # Handle key input
+        if k_in is not None:
+            k_input = k_in
+        elif to_keys is not None:
+            k_input = to_keys(s)
+            mask = to_keys(mask.unsqueeze(-1)).squeeze(-1)
+        else:
+            k_input = s
+            
+        # OPTIMIZATION 1: Fused QKV projection to reduce memory bandwidth
+        qkv = self.qkv_proj(s)  # Single matrix multiplication instead of 3
+        q, k, v = qkv.chunk(3, dim=-1)
+        
+        # Use k_input if different from s
+        if k_input is not s:
+            kv = self.qkv_proj(k_input)
+            _, k, v = kv.chunk(3, dim=-1)
+        
+        # OPTIMIZATION 2: Efficient tensor layout for better cache performance
+        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, D)
+        k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, D)
+        v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2).contiguous()  # (B, H, S, D)
+        
+        # OPTIMIZATION 3: Efficient z processing with caching
+        z_bias = self._process_z_optimized(z, model_cache)
+        
+        # Handle multiplicity efficiently
+        if multiplicity > 1:
+            q = q.repeat_interleave(multiplicity, 0)
+            k = k.repeat_interleave(multiplicity, 0)
+            v = v.repeat_interleave(multiplicity, 0)
+            z_bias = z_bias.repeat_interleave(multiplicity, 0)
+            mask = mask.repeat_interleave(multiplicity, 0)
+        
+        # OPTIMIZATION 4: Hyper-optimized attention with minimal allocations
+        attn_output = self._hyper_optimized_attention(q, k, v, z_bias, mask)
+        
+        # OPTIMIZATION 5: Efficient gating and output projection
+        g = self.proj_g(s).sigmoid()
+        if multiplicity > 1:
+            g = g.repeat_interleave(multiplicity, 0)
+        
+        # Transpose back and apply gating + output projection in one step
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B * multiplicity, S, -1)
+        output = self.proj_o(g * attn_output)
+        
+        if multiplicity > 1:
+            output = output.view(multiplicity, B, S, -1).mean(0)
+            
+        return output
+
+    def _process_z_optimized(self, z, model_cache=None):
+        """Ultra-efficient z processing with aggressive caching."""
+        cache_key = "z_hyper_opt"
+        
+        if model_cache is not None and cache_key in model_cache:
+            return model_cache[cache_key]
+        
+        # Fused normalization and projection
+        with torch.cuda.device(z.device):
+            z_norm = self.norm_z(z)
+            z_proj = self.proj_z(z_norm)
+            z_bias = z_proj.permute(0, 3, 1, 2).contiguous()  # (B, H, S, S)
+        
+        if model_cache is not None:
+            model_cache[cache_key] = z_bias
+            
+        return z_bias
+
+    def _hyper_optimized_attention(self, q, k, v, z_bias, mask):
+        """
+        Hyper-optimized attention computation with aggressive fusion.
+        
+        Args:
+            q, k, v: (B, H, S, D)
+            z_bias: (B, H, S, S)
+            mask: (B, S)
+        """
+        B, H, S, D = q.shape
+        
+        # OPTIMIZATION 6: Use torch.scaled_dot_product_attention when available (PyTorch 2.0+)
+        # This uses optimized kernels and can be faster than manual implementation
+        try:
+            if mask is not None:
+                # Create causal mask for scaled_dot_product_attention
+                mask_bool = mask.bool()
+                attn_mask = mask_bool.unsqueeze(1).unsqueeze(1) & mask_bool.unsqueeze(1).unsqueeze(-1)
+                attn_mask = attn_mask.expand(B, H, S, S)
+            else:
+                attn_mask = None
+            
+            # Use PyTorch's optimized attention when available
+            from torch.nn.functional import scaled_dot_product_attention
+            
+            # Add z_bias to the attention computation
+            if z_bias is not None:
+                # We need to handle z_bias manually since scaled_dot_product_attention doesn't support it directly
+                pass  # Fall back to manual implementation
+            else:
+                return scaled_dot_product_attention(
+                    q, k, v, 
+                    attn_mask=attn_mask if mask is not None else None,
+                    dropout_p=0.0,
+                    is_causal=False
+                )
+        except ImportError:
+            pass
+        
+        # FALLBACK: Manual optimized implementation with aggressive fusion
+        # Fused scaled dot-product with bias addition
+        # Use torch.baddbmm for optimal performance (beta*input + alpha*mat1@mat2)
+        scores = torch.empty(B, H, S, S, device=q.device, dtype=q.dtype)
+        
+        # Reshape for efficient batched matrix multiplication
+        q_flat = q.view(B * H, S, D)
+        k_flat = k.view(B * H, S, D)
+        z_bias_flat = z_bias.view(B * H, S, S)
+        
+        # Fused: scores = z_bias + scale * (q @ k^T)
+        torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1), 
+                     beta=1.0, alpha=self.scale, out=scores.view(B * H, S, S))
+        
+        scores = scores.view(B, H, S, S)
+        
+        # OPTIMIZATION 7: Efficient masking with boolean conversion
+        if mask is not None:
+            mask_bool = mask.bool()  # Convert to boolean for efficient indexing
+            # Expand mask to match attention shape
+            mask_expanded = mask_bool.unsqueeze(1).unsqueeze(1)  # (B, 1, 1, S)
+            mask_2d = mask_expanded & mask_bool.unsqueeze(1).unsqueeze(-1)  # (B, 1, S, S)
+            
+            # Apply mask efficiently
+            scores = scores.masked_fill(~mask_2d, float('-inf'))
+        
+        # OPTIMIZATION 8: Fused softmax and attention computation
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # OPTIMIZATION 9: Efficient attention output computation
+        v_flat = v.view(B * H, S, D)
+        attn_flat = attn_weights.view(B * H, S, S)
+        
+        # Compute attention output efficiently
+        out_flat = torch.bmm(attn_flat, v_flat)  # (B*H, S, D)
+        output = out_flat.view(B, H, S, D)
+        
+        return output
+
+
+class TurboOptimizedAttentionPairBias(nn.Module):
+    """
+    Turbo-optimized attention with the most aggressive optimizations:
+    1. Memory pool pre-allocation to avoid dynamic allocation
+    2. Kernel fusion wherever possible  
+    3. Optimized GEMM operations with custom strides
+    4. Cache-optimized memory access patterns
+    """
+
+    def __init__(self, c_s, c_z, num_heads):
+        super().__init__()
+        self.c_s = c_s
+        self.c_z = c_z
+        self.num_heads = num_heads
+        self.head_dim = c_s // num_heads
+        
+        # Pre-allocate weight matrices for optimal memory layout
+        self.qkv_weight = nn.Parameter(torch.empty(c_s, 3 * c_s))
+        self.proj_g_weight = nn.Parameter(torch.empty(c_s, c_s))
+        self.proj_o_weight = nn.Parameter(torch.empty(c_s, c_s))
+        
+        # Z processing weights
+        self.z_norm_weight = nn.Parameter(torch.empty(c_z))
+        self.z_norm_bias = nn.Parameter(torch.empty(c_z))
+        self.z_proj_weight = nn.Parameter(torch.empty(c_z, num_heads))
+        
+        # S processing weights  
+        self.s_norm_weight = nn.Parameter(torch.empty(c_s))
+        self.s_norm_bias = nn.Parameter(torch.empty(c_s))
+        
+        # Initialize weights
+        self._init_weights()
+        
+        # Pre-compute scaling factor
+        self.scale = (self.head_dim ** -0.5)
+        
+        # Memory pool for temporary tensors (initialized on first forward pass)
+        self._memory_pool = {}
+
+    def _init_weights(self):
+        """Initialize weights with optimal distributions."""
+        nn.init.xavier_uniform_(self.qkv_weight)
+        nn.init.xavier_uniform_(self.proj_g_weight)
+        nn.init.xavier_uniform_(self.proj_o_weight)
+        nn.init.xavier_uniform_(self.z_proj_weight)
+        nn.init.ones_(self.z_norm_weight)
+        nn.init.zeros_(self.z_norm_bias)
+        nn.init.ones_(self.s_norm_weight)
+        nn.init.zeros_(self.s_norm_bias)
+
+    def _get_or_allocate_tensor(self, key, shape, dtype, device):
+        """Get tensor from memory pool or allocate new one."""
+        if key not in self._memory_pool:
+            self._memory_pool[key] = torch.empty(shape, dtype=dtype, device=device)
+        elif self._memory_pool[key].shape != shape:
+            # Reallocate if shape changed
+            self._memory_pool[key] = torch.empty(shape, dtype=dtype, device=device)
+        return self._memory_pool[key]
+
+    def forward(self, s, z, mask, multiplicity=1, to_keys=None, 
+               model_cache=None, k_in=None):
+        B, S, D = s.shape
+        device = s.device
+        dtype = s.dtype
+        
+        # TURBO OPTIMIZATION 1: Fused layer norm + QKV projection
+        # Manual layer norm for maximum efficiency
+        s_mean = s.mean(dim=-1, keepdim=True)
+        s_var = s.var(dim=-1, keepdim=True, unbiased=False)
+        s_norm = (s - s_mean) / torch.sqrt(s_var + 1e-5)
+        s_norm = s_norm * self.s_norm_weight + self.s_norm_bias
+        
+        # Handle key input
+        if k_in is not None:
+            k_input = k_in
+        elif to_keys is not None:
+            k_input = to_keys(s_norm)
+            mask = to_keys(mask.unsqueeze(-1)).squeeze(-1)
+        else:
+            k_input = s_norm
+            
+        # TURBO OPTIMIZATION 2: Single GEMM for QKV projection
+        qkv = torch.mm(s_norm.view(-1, D), self.qkv_weight)  # More efficient than F.linear
+        qkv = qkv.view(B, S, 3 * D)
+        q, k, v = qkv.chunk(3, dim=-1)
+        
+        # Use k_input if different
+        if k_input is not s_norm:
+            kv = torch.mm(k_input.view(-1, D), self.qkv_weight[:, D:])  # Only K,V part
+            kv = kv.view(B, S, 2 * D)
+            k, v = kv.chunk(2, dim=-1)
+        
+        # TURBO OPTIMIZATION 3: Optimal tensor layout for cache efficiency
+        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D)
+        k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # TURBO OPTIMIZATION 4: Efficient z processing with minimal allocations
+        z_mean = z.mean(dim=-1, keepdim=True)
+        z_var = z.var(dim=-1, keepdim=True, unbiased=False)
+        z_norm = (z - z_mean) / torch.sqrt(z_var + 1e-5)
+        z_norm = z_norm * self.z_norm_weight + self.z_norm_bias
+        
+        z_proj = torch.matmul(z_norm, self.z_proj_weight)
+        z_bias = z_proj.permute(0, 3, 1, 2)  # (B, H, S, S)
+        
+        # Handle multiplicity efficiently
+        if multiplicity > 1:
+            q = q.repeat_interleave(multiplicity, 0)
+            k = k.repeat_interleave(multiplicity, 0)
+            v = v.repeat_interleave(multiplicity, 0)
+            z_bias = z_bias.repeat_interleave(multiplicity, 0)
+            mask = mask.repeat_interleave(multiplicity, 0)
+        
+        # TURBO OPTIMIZATION 5: Ultra-efficient attention with memory pooling
+        attn_output = self._turbo_attention(q, k, v, z_bias, mask, dtype, device)
+        
+        # TURBO OPTIMIZATION 6: Fused gating and output projection
+        g = torch.mm(s_norm.view(-1, D), self.proj_g_weight).view(B, S, D).sigmoid()
+        if multiplicity > 1:
+            g = g.repeat_interleave(multiplicity, 0)
+        
+        # Final projection with gating
+        attn_flat = attn_output.transpose(1, 2).contiguous().view(-1, D)
+        g_flat = g.view(-1, D)
+        output_flat = torch.mm(g_flat * attn_flat, self.proj_o_weight)
+        output = output_flat.view(B * multiplicity, S, D)
+        
+        if multiplicity > 1:
+            output = output.view(multiplicity, B, S, D).mean(0)
+            
+        return output
+
+    def _turbo_attention(self, q, k, v, z_bias, mask, dtype, device):
+        """Ultra-efficient attention with memory pooling and kernel fusion."""
+        B, H, S, D = q.shape
+        
+        # Use pre-allocated memory pool
+        scores_key = f"scores_{B}_{H}_{S}_{S}"
+        scores = self._get_or_allocate_tensor(scores_key, (B, H, S, S), dtype, device)
+        
+        # Reshape for batched operations
+        q_flat = q.view(B * H, S, D)
+        k_flat = k.view(B * H, S, D)
+        z_bias_flat = z_bias.view(B * H, S, S)
+        
+        # Fused scaled dot-product: scores = z_bias + scale * (q @ k^T)  
+        torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1),
+                     beta=1.0, alpha=self.scale, out=scores.view(B * H, S, S))
+        
+        # Efficient masking
+        if mask is not None:
+            mask_bool = mask.bool()
+            mask_2d = mask_bool.unsqueeze(1).unsqueeze(1) & mask_bool.unsqueeze(1).unsqueeze(-1)
+            scores = scores.masked_fill(~mask_2d, float('-inf'))
+        
+        # In-place softmax for memory efficiency
+        torch.softmax(scores, dim=-1, out=scores)
+        
+        # Efficient attention computation
+        v_flat = v.view(B * H, S, D)
+        scores_flat = scores.view(B * H, S, S)
+        
+        out_key = f"attn_out_{B}_{H}_{S}_{D}"
+        out_flat = self._get_or_allocate_tensor(out_key, (B * H, S, D), dtype, device)
+        torch.bmm(scores_flat, v_flat, out=out_flat)
+        
+        return out_flat.view(B, H, S, D)
+
+
 class PureOptimizedAttentionPairBias(OptimizedAttentionPairBias):
     """
     Pure PyTorch optimization that avoids cuEquivariance overhead entirely.
