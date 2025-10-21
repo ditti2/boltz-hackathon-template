@@ -572,20 +572,20 @@ def test_gradient_support():
     pair_mask = torch.ones((BATCH_SIZE, 64, 64), device=device, requires_grad=False).float()
     
     configs = [
-        ("Default", False, False, False, False, False, False, False, False),
-        ("Trimul", True, False, False, False, False, False, False, False),
-        ("TriAttn+Trimul", True, True, False, False, False, False, False, False),
-        ("HyperOptAttn", False, False, True, False, False, False, False, False),
-        ("TurboOptAttn", False, False, False, True, False, False, False, False),
-        ("LayerNormOpt", False, False, False, False, True, False, False, False),
-        ("FusedAttn", False, False, False, False, False, True, False, False),
-        ("FusedAttn+Trimul", True, False, False, False, False, True, False, False),
+        ("Default", False, False, False, False, False, False),
+        ("Trimul", True, False, False, False, False, False),
+        ("TriAttn+Trimul", True, True, False, False, False, False),
+        ("HyperOptAttn", False, False, True, False, False, False),
+        ("TurboOptAttn", False, False, False, True, False, False),
+        ("LayerNormOpt", False, False, False, False, True, False),
+        ("FusedAttn", False, False, False, False, False, True),
+        ("FusedAttn+Trimul", True, False, False, False, False, True),
     ]
     
     results = []
     
     for name, use_cuequiv_mul, use_cuequiv_attn, use_opt_attn, use_turbo_attn, \
-        use_layernorm_attn, use_fused_attn, use_ultra_attn, use_minimal_attn in configs:
+        use_layernorm_attn, use_fused_attn in configs:
         
         s_test = s.clone().detach().requires_grad_(True)
         z_test = z.clone().detach().requires_grad_(True)
@@ -594,8 +594,7 @@ def test_gradient_support():
             # Forward and backward pass
             s_out, z_out = backward(model, s_test, z_test, mask, pair_mask, 
                                    use_cuequiv_mul, use_cuequiv_attn, use_opt_attn, 
-                                   use_turbo_attn, use_layernorm_attn, use_fused_attn,
-                                   use_ultra_attn, use_minimal_attn)
+                                   use_turbo_attn, use_layernorm_attn, use_fused_attn)
             
             # Create dummy loss and backprop
             loss = s_out.sum() + z_out.sum()
