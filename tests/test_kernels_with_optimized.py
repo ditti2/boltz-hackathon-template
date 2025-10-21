@@ -32,7 +32,7 @@ def benchmark_attention_only():
     
     try:
         from boltz.model.layers.attention import AttentionPairBias as BoltzAttention
-        from boltz.model.layers.optimized_attention import OptimizedAttentionPairBias as OptAttention
+        from boltz.model.layers.optimized_attention import UltraOptimizedAttentionPairBias as OptAttention
     except ImportError as e:
         print(f"Cannot import attention modules: {e}")
         return
