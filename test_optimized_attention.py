@@ -516,9 +516,15 @@ def run_multiple_benchmarks(
             speedup = boltz_time / result['time_ms'] if boltz_time and result.get('time_ms') else 1.0
             max_diff = result.get('max_diff', float('nan'))
             
-            # Use values from key instead of result to avoid None values
-            result_seq_len = result.get('seq_len', seq_len) or seq_len
-            result_batch_size = result.get('batch_size', batch_size) or batch_size
+            # Ensure we have valid values, use defaults if needed
+            result_seq_len = result.get('seq_len')
+            if result_seq_len is None:
+                result_seq_len = seq_len if seq_len is not None else 0
+                
+            result_batch_size = result.get('batch_size')
+            if result_batch_size is None:
+                result_batch_size = batch_size if batch_size is not None else 0
+                
             time_ms = result.get('time_ms', float('nan'))
             mem_used_gb = result.get('mem_used_gb', float('nan'))
             
