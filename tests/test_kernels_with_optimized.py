@@ -25,10 +25,12 @@ torch.set_grad_enabled(not INFERENCE)
 # Direct imports without fallbacks
 from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
 from boltz.model.layers.layernorm_optimized_attention import LayerNormOptimizedAttentionPairBias, FusedAttentionPairBias
+from boltz.model.layers.ultra_optimized_attention import UltraFusedAttentionPairBias, CuEquivarianceHybridAttention, MinimalOverheadAttention
 
 HAS_OPTIMIZED = True
 HAS_TURBO = True
 HAS_LAYERNORM_OPT = True
+HAS_ULTRA = True
 
 # Preload modules
 model = PairformerLayer(C_S, C_Z, v2=True)
@@ -41,51 +43,55 @@ opt_model = None
 turbo_model = None
 layernorm_model = None
 fused_model = None
+ultra_model = None
+hybrid_model = None
+minimal_model = None
 
 if HAS_OPTIMIZED:
     opt_model = PairformerLayer(C_S, C_Z, v2=True)
-    # Replace the attention module with optimized version
-    if hasattr(opt_model, 'attention'):
-        opt_model.attention = HyperOptimizedAttentionPairBias(
-            C_S, C_Z, opt_model.attention.num_heads
-        )
+    opt_model.attention_pair_bias = HyperOptimizedAttentionPairBias(C_S, C_Z, opt_model.attention_pair_bias.num_heads)
     opt_model.cuda()
     if INFERENCE:
         opt_model.eval()
 
 if HAS_TURBO:
     turbo_model = PairformerLayer(C_S, C_Z, v2=True)
-    # Replace with turbo optimized version
-    if hasattr(turbo_model, 'attention'):
-        turbo_model.attention = TurboOptimizedAttentionPairBias(
-            C_S, C_Z, turbo_model.attention.num_heads
-        )
+    turbo_model.attention_pair_bias = TurboOptimizedAttentionPairBias(C_S, C_Z, turbo_model.attention_pair_bias.num_heads)
     turbo_model.cuda()
     if INFERENCE:
         turbo_model.eval()
 
 if HAS_LAYERNORM_OPT:
     layernorm_model = PairformerLayer(C_S, C_Z, v2=True)
-    # Replace with LayerNorm optimized version
-    if hasattr(layernorm_model, 'attention'):
-        layernorm_model.attention = LayerNormOptimizedAttentionPairBias(
-            C_S, C_Z, layernorm_model.attention.num_heads
-        )
+    layernorm_model.attention_pair_bias = LayerNormOptimizedAttentionPairBias(C_S, C_Z, layernorm_model.attention_pair_bias.num_heads)
     layernorm_model.cuda()
     if INFERENCE:
         layernorm_model.eval()
-        
+    
     fused_model = PairformerLayer(C_S, C_Z, v2=True)
-    # Replace with Fused attention version
-    if hasattr(fused_model, 'attention'):
-        fused_model.attention = FusedAttentionPairBias(
-            C_S, C_Z, fused_model.attention.num_heads
-        )
+    fused_model.attention_pair_bias = FusedAttentionPairBias(C_S, C_Z, fused_model.attention_pair_bias.num_heads)
     fused_model.cuda()
     if INFERENCE:
         fused_model.eval()
 
-
+if HAS_ULTRA:
+    ultra_model = PairformerLayer(C_S, C_Z, v2=True)
+    ultra_model.attention_pair_bias = UltraFusedAttentionPairBias(C_S, C_Z, ultra_model.attention_pair_bias.num_heads)
+    ultra_model.cuda()
+    if INFERENCE:
+        ultra_model.eval()
+        
+    hybrid_model = PairformerLayer(C_S, C_Z, v2=True)
+    hybrid_model.attention_pair_bias = CuEquivarianceHybridAttention(C_S, C_Z, hybrid_model.attention_pair_bias.num_heads)
+    hybrid_model.cuda()
+    if INFERENCE:
+        hybrid_model.eval()
+        
+    minimal_model = PairformerLayer(C_S, C_Z, v2=True)
+    minimal_model.attention_pair_bias = MinimalOverheadAttention(C_S, C_Z, minimal_model.attention_pair_bias.num_heads)
+    minimal_model.cuda()
+    if INFERENCE:
+        minimal_model.eval()
 def fwd(model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False):
     if use_fused_attn and fused_model is not None:
         fused_model(s, z, mask, pair_mask, use_cuequiv_mul=use_cuequiv_mul, use_cuequiv_attn=use_cuequiv_attn)
@@ -236,6 +242,9 @@ def analyze_performance_vs_trimul():
             "LayerNormOpt",
             "FusedAttn",
             "FusedAttn+Trimul",
+            "UltraFused",
+            "CuEqHybrid", 
+            "MinimalOH",
         ],
         line_names=[
             "Default",
@@ -246,6 +255,9 @@ def analyze_performance_vs_trimul():
             "LayerNormOpt",
             "FusedAttn",
             "FusedAttn+Trimul",
+            "UltraFused",
+            "CuEqHybrid",
+            "MinimalOH",
         ],
         plot_name="optimized_vs_trimul",
         args={},
@@ -385,6 +397,48 @@ def benchmark(size, provider):
                     use_fused_attn=True,
                 )
             )
+        elif provider == "UltraFused":
+            if not HAS_ULTRA:
+                return float('nan')
+            ms = speed(
+                lambda: fn(
+                    ultra_model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=False,
+                    use_cuequiv_mul=False,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
+                )
+            )
+        elif provider == "CuEqHybrid":
+            if not HAS_ULTRA:
+                return float('nan')
+            ms = speed(
+                lambda: fn(
+                    hybrid_model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=False,
+                    use_cuequiv_mul=False,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
+                )
+            )
+        elif provider == "MinimalOH":
+            if not HAS_ULTRA:
+                return float('nan')
+            ms = speed(
+                lambda: fn(
+                    minimal_model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=False,
+                    use_cuequiv_mul=False,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
+                )
+            )
 
     return ms / BATCH_SIZE
 
@@ -484,6 +538,24 @@ if __name__ == "__main__":
                 memory_layernorm = start_mem
                 memory_fused = start_mem
                 memory_fused_trimul = start_mem
+                
+            if HAS_ULTRA:
+                memory_ultra = memory_measure(
+                    lambda: fwd(ultra_model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False),
+                    device=device,
+                )
+                memory_hybrid = memory_measure(
+                    lambda: fwd(hybrid_model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False),
+                    device=device,
+                )
+                memory_minimal = memory_measure(
+                    lambda: fwd(minimal_model, s, z, mask, pair_mask, use_cuequiv_mul=False, use_cuequiv_attn=False, use_opt_attn=False, use_turbo_attn=False, use_layernorm_attn=False, use_fused_attn=False),
+                    device=device,
+                )
+            else:
+                memory_ultra = start_mem
+                memory_hybrid = start_mem
+                memory_minimal = start_mem
             
             memory_results.append({
                 "size": size,
@@ -495,6 +567,9 @@ if __name__ == "__main__":
                 "LayerNormOpt": memory_layernorm - start_mem,
                 "FusedAttn": memory_fused - start_mem,
                 "FusedAttn+Trimul": memory_fused_trimul - start_mem,
+                "UltraFused": memory_ultra - start_mem,
+                "CuEqHybrid": memory_hybrid - start_mem,
+                "MinimalOH": memory_minimal - start_mem,
             })
 
     memory_df = pd.DataFrame(memory_results)
