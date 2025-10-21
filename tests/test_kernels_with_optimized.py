@@ -20,32 +20,13 @@ PRECISION = torch.bfloat16
 device = "cuda:0"
 torch.set_grad_enabled(not INFERENCE)
 
-# Try to import optimized attention
-try:
-    from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
-    from boltz.model.layers.layernorm_optimized_attention import LayerNormOptimizedAttentionPairBias, FusedAttentionPairBias
-    HAS_OPTIMIZED = True
-    HAS_TURBO = True
-    HAS_LAYERNORM_OPT = True
-except ImportError:
-    try:
-        from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
-        HAS_OPTIMIZED = True
-        HAS_TURBO = True
-        HAS_LAYERNORM_OPT = False
-        print("LayerNorm optimized attention not available")
-    except ImportError:
-        try:
-            from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias
-            HAS_OPTIMIZED = True
-            HAS_TURBO = False
-            HAS_LAYERNORM_OPT = False
-            print("TurboOptimizedAttentionPairBias not available")
-        except ImportError:
-            HAS_OPTIMIZED = False
-            HAS_TURBO = False
-            HAS_LAYERNORM_OPT = False
-            print("Optimized attention not available")
+# Direct imports without fallbacks
+from boltz.model.layers.optimized_attention import HyperOptimizedAttentionPairBias, TurboOptimizedAttentionPairBias
+from boltz.model.layers.layernorm_optimized_attention import LayerNormOptimizedAttentionPairBias, FusedAttentionPairBias
+
+HAS_OPTIMIZED = True
+HAS_TURBO = True
+HAS_LAYERNORM_OPT = True
 
 # Preload modules
 model = PairformerLayer(C_S, C_Z, v2=True)

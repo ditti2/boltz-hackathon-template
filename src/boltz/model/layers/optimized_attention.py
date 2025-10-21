@@ -11,19 +11,9 @@ import torch.nn as nn
 import math
 from typing import Dict, Optional
 
-# Try to import cuEquivariance
-try:
-    from cuequivariance_torch import attention_pair_bias as cueq_attention_pair_bias
-    HAS_CUEQUIVARIANCE = True
-except ImportError:
-    HAS_CUEQUIVARIANCE = False
-
-# Try to import APEX for optimized LayerNorm
-try:
-    from apex.normalization import FusedLayerNorm
-    HAS_APEX = True
-except ImportError:
-    HAS_APEX = False
+# Direct imports - no fallbacks  
+from cuequivariance_torch import attention_pair_bias as cueq_attention_pair_bias
+from apex.normalization import FusedLayerNorm
 
 
 class OptimizedLayerNorm(nn.Module):
@@ -36,10 +26,8 @@ class OptimizedLayerNorm(nn.Module):
         super().__init__()
         self.normalized_shape = normalized_shape
         
-        if HAS_APEX:
-            self.norm = FusedLayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
-        else:
-            self.norm = nn.LayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
+        # Use APEX FusedLayerNorm directly
+        self.norm = FusedLayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
 
     def forward(self, x):
         return self.norm(x)
@@ -245,9 +233,8 @@ class OptimizedAttentionPairBias(nn.Module):
             # Default: use the input s as keys
             k_in = s
             
-        # Use cuEquivariance smartly - avoid overhead for smaller sequences  
-        # Focus on PyTorch optimizations where cuEquivariance has overhead
-        if HAS_CUEQUIVARIANCE and S >= 256:  # Raised threshold back up
+        # Use cuEquivariance for larger sequences where it's beneficial
+        if S >= 256:
             return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
         
         # Otherwise use our optimized PyTorch implementation
@@ -877,7 +864,7 @@ class UltraOptimizedAttentionPairBias(OptimizedAttentionPairBias):
             
         # Use cuEquivariance only for larger sequences where it's beneficial
         # Based on TriAttn+Trimul analysis: avoid cuEquivariance overhead for small sequences
-        if HAS_CUEQUIVARIANCE and S >= 256:  # Conservative threshold
+        if S >= 256:  # Conservative threshold
             return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
         
         # Focus on ultra-optimized PyTorch for small-medium sequences

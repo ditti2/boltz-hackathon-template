@@ -9,105 +9,13 @@ import torch.nn.functional as F
 import math
 from typing import Dict, Optional
 
-# Try to import optimized kernels
-try:
-    from apex.normalization import FusedLayerNorm
-    HAS_APEX_LAYERNORM = True
-except ImportError:
-    HAS_APEX_LAYERNORM = False
-
-try:
-    import triton
-    import triton.language as tl
-    HAS_TRITON = True
-except ImportError:
-    HAS_TRITON = False
-
-
-# Custom Triton LayerNorm kernel for maximum performance
-if HAS_TRITON:
-    @triton.jit
-    def layernorm_kernel(
-        x_ptr, y_ptr, w_ptr, b_ptr,
-        mean_ptr, rstd_ptr,
-        stride_x_row, stride_y_row,
-        N, eps,
-        BLOCK_SIZE: tl.constexpr
-    ):
-        # Get row index
-        row_idx = tl.program_id(0)
-        
-        # Load row data
-        cols = tl.arange(0, BLOCK_SIZE)
-        mask = cols < N
-        
-        x_ptrs = x_ptr + row_idx * stride_x_row + cols
-        x = tl.load(x_ptrs, mask=mask, other=0.0)
-        
-        # Compute mean
-        mean = tl.sum(x, axis=0) / N
-        tl.store(mean_ptr + row_idx, mean)
-        
-        # Compute variance
-        x_centered = x - mean
-        var = tl.sum(x_centered * x_centered, axis=0) / N
-        rstd = 1.0 / tl.sqrt(var + eps)
-        tl.store(rstd_ptr + row_idx, rstd)
-        
-        # Normalize and scale
-        w = tl.load(w_ptr + cols, mask=mask, other=1.0)
-        b = tl.load(b_ptr + cols, mask=mask, other=0.0)
-        
-        y = x_centered * rstd * w + b
-        
-        # Store result
-        y_ptrs = y_ptr + row_idx * stride_y_row + cols
-        tl.store(y_ptrs, y, mask=mask)
-
-
-class TritonLayerNorm(nn.Module):
-    """Ultra-fast LayerNorm using Triton kernels."""
-    
-    def __init__(self, normalized_shape, eps=1e-5):
-        super().__init__()
-        self.normalized_shape = normalized_shape
-        self.eps = eps
-        
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-    
-    def forward(self, x):
-        if not HAS_TRITON or x.device.type != 'cuda':
-            # Fallback to standard LayerNorm
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        
-        original_shape = x.shape
-        x = x.view(-1, self.normalized_shape[0])
-        M, N = x.shape
-        
-        # Allocate outputs
-        y = torch.empty_like(x)
-        mean = torch.empty((M,), device=x.device, dtype=x.dtype)
-        rstd = torch.empty((M,), device=x.device, dtype=x.dtype)
-        
-        # Launch kernel
-        BLOCK_SIZE = triton.next_power_of_2(N)
-        grid = (M,)
-        
-        layernorm_kernel[grid](
-            x, y, self.weight, self.bias, mean, rstd,
-            x.stride(0), y.stride(0),
-            N, self.eps,
-            BLOCK_SIZE=BLOCK_SIZE
-        )
-        
-        return y.view(original_shape)
+# Direct imports - no fallbacks
+from apex.normalization import FusedLayerNorm
 
 
 class OptimalLayerNorm(nn.Module):
     """
-    LayerNorm that automatically selects the best available implementation.
-    Priority: Triton > APEX > PyTorch
+    LayerNorm that uses APEX FusedLayerNorm for better performance.
     """
     
     def __init__(self, normalized_shape, eps=1e-5):
@@ -115,16 +23,9 @@ class OptimalLayerNorm(nn.Module):
         self.normalized_shape = normalized_shape
         self.eps = eps
         
-        # Try to use the best available implementation
-        if HAS_TRITON:
-            self.norm = TritonLayerNorm(normalized_shape, eps)
-            self.backend = "Triton"
-        elif HAS_APEX_LAYERNORM:
-            self.norm = FusedLayerNorm(normalized_shape, eps=eps)
-            self.backend = "APEX"
-        else:
-            self.norm = nn.LayerNorm(normalized_shape, eps=eps)
-            self.backend = "PyTorch"
+        # Use APEX FusedLayerNorm for optimized performance
+        self.norm = FusedLayerNorm(normalized_shape, eps=eps)
+        self.backend = "APEX"
     
     def forward(self, x):
         return self.norm(x)
