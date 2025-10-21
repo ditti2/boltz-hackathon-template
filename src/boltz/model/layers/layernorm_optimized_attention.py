@@ -9,13 +9,10 @@ import torch.nn.functional as F
 import math
 from typing import Dict, Optional
 
-# Direct imports - no fallbacks
-from apex.normalization import FusedLayerNorm
-
 
 class OptimalLayerNorm(nn.Module):
     """
-    LayerNorm that uses APEX FusedLayerNorm for better performance.
+    LayerNorm optimized for performance using PyTorch's native implementation.
     """
     
     def __init__(self, normalized_shape, eps=1e-5):
@@ -23,9 +20,9 @@ class OptimalLayerNorm(nn.Module):
         self.normalized_shape = normalized_shape
         self.eps = eps
         
-        # Use APEX FusedLayerNorm for optimized performance
-        self.norm = FusedLayerNorm(normalized_shape, eps=eps)
-        self.backend = "APEX"
+        # Use PyTorch LayerNorm for compatibility
+        self.norm = nn.LayerNorm(normalized_shape, eps=eps)
+        self.backend = "PyTorch"
     
     def forward(self, x):
         return self.norm(x)

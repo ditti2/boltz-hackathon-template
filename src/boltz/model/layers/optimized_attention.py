@@ -13,7 +13,6 @@ from typing import Dict, Optional
 
 # Direct imports - no fallbacks  
 from cuequivariance_torch import attention_pair_bias as cueq_attention_pair_bias
-from apex.normalization import FusedLayerNorm
 
 
 class OptimizedLayerNorm(nn.Module):
@@ -26,8 +25,8 @@ class OptimizedLayerNorm(nn.Module):
         super().__init__()
         self.normalized_shape = normalized_shape
         
-        # Use APEX FusedLayerNorm directly
-        self.norm = FusedLayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
+        # Use PyTorch LayerNorm directly
+        self.norm = nn.LayerNorm(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
 
     def forward(self, x):
         return self.norm(x)
