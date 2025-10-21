@@ -178,8 +178,9 @@ class FusedAttentionPairBias(nn.Module):
         self.norm_s = OptimalLayerNorm(c_s)
         self.norm_z = OptimalLayerNorm(c_z)
         
-        # Fused weight matrix for Q, K, V
-        self.qkv_weight = nn.Parameter(torch.empty(c_s, 3 * c_s))
+        # Fused weight matrix for Q, K, V  
+        # F.linear expects (out_features, in_features)
+        self.qkv_weight = nn.Parameter(torch.empty(3 * c_s, c_s))
         self.proj_g = nn.Linear(c_s, c_s)
         self.proj_o = nn.Linear(c_s, c_s)
         self.proj_z = nn.Linear(c_z, num_heads, bias=False)
@@ -217,7 +218,7 @@ class FusedAttentionPairBias(nn.Module):
         
         # Handle different k_input
         if k_input is not s:
-            kv = F.linear(k_input, self.qkv_weight[:, D:])  # Only K,V part
+            kv = F.linear(k_input, self.qkv_weight[D:])  # Only K,V part (rows D: onwards)
             k, v = kv.chunk(2, dim=-1)
         
         # Efficient reshape and transpose
