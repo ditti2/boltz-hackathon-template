@@ -581,7 +581,6 @@ class HyperOptimizedAttentionPairBias(nn.Module):
         # FALLBACK: Manual optimized implementation with aggressive fusion
         # Fused scaled dot-product with bias addition
         # Use torch.baddbmm for optimal performance (beta*input + alpha*mat1@mat2)
-        scores = torch.empty(B, H, S, S, device=q.device, dtype=q.dtype)
         
         # Reshape for efficient batched matrix multiplication
         q_flat = q.view(B * H, S, D)
@@ -589,10 +588,11 @@ class HyperOptimizedAttentionPairBias(nn.Module):
         z_bias_flat = z_bias.view(B * H, S, S)
         
         # Fused: scores = z_bias + scale * (q @ k^T)
-        torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1), 
-                     beta=1.0, alpha=self.scale, out=scores.view(B * H, S, S))
+        # Don't use out= parameter to support automatic differentiation
+        scores_flat = torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1), 
+                                   beta=1.0, alpha=self.scale)
         
-        scores = scores.view(B, H, S, S)
+        scores = scores_flat.view(B, H, S, S)
         
         # OPTIMIZATION 7: Efficient masking with boolean conversion
         if mask is not None:
@@ -757,7 +757,6 @@ class TurboOptimizedAttentionPairBias(nn.Module):
         
         # Use pre-allocated memory pool
         scores_key = f"scores_{B}_{H}_{S}_{S}"
-        scores = self._get_or_allocate_tensor(scores_key, (B, H, S, S), dtype, device)
         
         # Reshape for batched operations
         q_flat = q.view(B * H, S, D)
@@ -765,8 +764,10 @@ class TurboOptimizedAttentionPairBias(nn.Module):
         z_bias_flat = z_bias.view(B * H, S, S)
         
         # Fused scaled dot-product: scores = z_bias + scale * (q @ k^T)  
-        torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1),
-                     beta=1.0, alpha=self.scale, out=scores.view(B * H, S, S))
+        # Don't use out= parameter to support automatic differentiation
+        scores_flat = torch.baddbmm(z_bias_flat, q_flat, k_flat.transpose(-2, -1),
+                                   beta=1.0, alpha=self.scale)
+        scores = scores_flat.view(B, H, S, S)
         
         # Efficient masking
         if mask is not None:
@@ -774,16 +775,15 @@ class TurboOptimizedAttentionPairBias(nn.Module):
             mask_2d = mask_bool.unsqueeze(1).unsqueeze(1) & mask_bool.unsqueeze(1).unsqueeze(-1)
             scores = scores.masked_fill(~mask_2d, float('-inf'))
         
-        # In-place softmax for memory efficiency
-        torch.softmax(scores, dim=-1, out=scores)
+        # Softmax - don't use in-place for gradient support
+        attn_weights = torch.softmax(scores, dim=-1)
         
         # Efficient attention computation
         v_flat = v.view(B * H, S, D)
-        scores_flat = scores.view(B * H, S, S)
+        attn_flat = attn_weights.view(B * H, S, S)
         
-        out_key = f"attn_out_{B}_{H}_{S}_{D}"
-        out_flat = self._get_or_allocate_tensor(out_key, (B * H, S, D), dtype, device)
-        torch.bmm(scores_flat, v_flat, out=out_flat)
+        # Don't use out= parameter to support automatic differentiation
+        out_flat = torch.bmm(attn_flat, v_flat)
         
         return out_flat.view(B, H, S, D)
 
