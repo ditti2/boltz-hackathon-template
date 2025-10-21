@@ -176,7 +176,8 @@ def speed(func, its=10, warmup=10):
         line_arg="provider",
         line_vals=[
             "Default",
-            "Trimul", 
+            "Trimul",
+            "TriAttn+Trimul", 
             "HyperOptAttn",
             "TurboOptAttn",
             "LayerNormOpt",
@@ -186,6 +187,7 @@ def speed(func, its=10, warmup=10):
         line_names=[
             "Default",
             "Trimul",
+            "TriAttn+Trimul",
             "HyperOptAttn", 
             "TurboOptAttn",
             "LayerNormOpt",
@@ -243,6 +245,18 @@ def benchmark(size, provider):
                     use_cuequiv_attn=False,
                     use_cuequiv_mul=True,
                     use_opt_attn=False,
+                )
+            )
+        elif provider == "TriAttn+Trimul":
+            ms = speed(
+                lambda: fn(
+                    model, s, z, mask, pair_mask,
+                    use_cuequiv_attn=True,
+                    use_cuequiv_mul=True,
+                    use_opt_attn=False,
+                    use_turbo_attn=False,
+                    use_layernorm_attn=False,
+                    use_fused_attn=False,
                 )
             )
         elif provider == "HyperOptAttn":
@@ -319,109 +333,151 @@ def benchmark(size, provider):
     return ms / BATCH_SIZE
 
 
-def analyze_triton_results(results_data=None):
+def analyze_triton_results(results_data, memory_data=None):
     """
-    Capture and analyze results from Triton benchmark.
+    Analyze performance and memory results from benchmark data.
     
     Args:
-        results_data: Dict with benchmark results, or None to use sample data
+        results_data: Dict with benchmark results (required)
+        memory_data: Dict with memory usage results (optional)
     """
+    if results_data is None:
+        print("Error: No benchmark data provided. Please provide actual benchmark results.")
+        return None, None, None
+        
     print("\n" + "="*80)
-    print("🚀 PERFORMANCE ANALYSIS: Best Method per Sequence Size")
+    print("� PERFORMANCE ANALYSIS: Best Method per Sequence Size")
     print("="*80)
     
-    # Use provided data or sample data
-    if results_data is None:
-        # Sample results - replace with actual data when available
-        results_data = {
-            'size': [64.0, 128.0, 256.0, 512.0],
-            'Default': [0.010797, 0.011778, 0.084337, 0.482963],
-            'Trimul': [0.010742, 0.012808, 0.065764, 0.394785],
-            'HyperOptAttn': [0.010651, 0.011795, 0.084504, 0.483443],
-            'TurboOptAttn': [0.010886, 0.012336, 0.088742, 0.504486],
-            'LayerNormOpt': [0.010524, 0.011913, 0.084504, 0.483493],
-            'FusedAttn': [0.010579, 0.011935, 0.084572, 0.483654],
-            'FusedAttn+Trimul': [0.010612, 0.012929, 0.065931, 0.395125]
-        }
-        print("📝 Using sample data - replace with actual benchmark results")
-    else:
-        print("📊 Analyzing provided benchmark results")
+    print("📊 Analyzing provided benchmark results")
     
     df = pd.DataFrame(results_data)
+    memory_df = pd.DataFrame(memory_data)
     
-    print("\n📊 BENCHMARK RESULTS")
-    print("-" * 95)
+    print("\n📊 PERFORMANCE RESULTS (seconds)")
+    print("-" * 110)
     print(df.to_string(index=False, float_format='%.6f'))
     
-    # Find best method for each sequence size
+    print("\n💾 MEMORY USAGE (MB)")
+    print("-" * 110)
+    print(memory_df.to_string(index=False, float_format='%.0f'))
+    
+    # Find best method for each sequence size (performance)
     methods = [col for col in df.columns if col != 'size']
     
     analysis_results = []
-    for idx, row in df.iterrows():
-        size = row['size']
-        times = {method: row[method] for method in methods}
-        best_method = min(times, key=times.get)
-        best_time = times[best_method]
+    memory_analysis_results = []
+    
+    for idx, (perf_row, mem_row) in enumerate(zip(df.iterrows(), memory_df.iterrows())):
+        size = perf_row[1]['size']
+        
+        # Performance analysis
+        perf_times = {method: perf_row[1][method] for method in methods}
+        best_perf_method = min(perf_times, key=perf_times.get)
+        best_time = perf_times[best_perf_method]
+        
+        # Memory analysis
+        mem_usage = {method: mem_row[1][method] for method in methods}
+        best_mem_method = min(mem_usage, key=mem_usage.get)
+        best_memory = mem_usage[best_mem_method]
         
         # Calculate speedup vs default
-        default_time = row['Default']
+        default_time = perf_row[1]['Default']
         speedup = default_time / best_time
         speedup_pct = (speedup - 1) * 100
         
         # Calculate speedup vs trimul 
-        trimul_time = row.get('Trimul', default_time)
+        trimul_time = perf_row[1].get('Trimul', default_time)
         trimul_speedup = trimul_time / best_time
         trimul_speedup_pct = (trimul_speedup - 1) * 100
         
+        # Memory savings vs default
+        default_memory = mem_row[1]['Default']
+        mem_savings = ((default_memory - best_memory) / default_memory) * 100
+        
         analysis_results.append({
             'Size': int(size),
-            'Best_Method': best_method,
+            'Best_Perf_Method': best_perf_method,
             'Best_Time': f"{best_time:.6f}s",
             'vs_Default': f"+{speedup_pct:.1f}%" if speedup_pct > 0 else f"{speedup_pct:.1f}%",
-            'vs_Trimul': f"+{trimul_speedup_pct:.1f}%" if trimul_speedup_pct > 0 else f"{trimul_speedup_pct:.1f}%"
+            'vs_Trimul': f"+{trimul_speedup_pct:.1f}%" if trimul_speedup_pct > 0 else f"{trimul_speedup_pct:.1f}%",
+            'Best_Mem_Method': best_mem_method,
+            'Best_Memory': f"{best_memory:.0f}MB",
+            'Mem_Savings': f"{mem_savings:.1f}%" if mem_savings > 0 else f"{mem_savings:.1f}%"
         })
     
     # Display winner analysis
     print(f"\n🏆 WINNER ANALYSIS")
-    print("-" * 80)
+    print("-" * 100)
+    print(f"{'Size':>4} | {'Performance Winner':^20} | {'Time':^12} | {'vs Default':^10} | {'vs Trimul':^10} | {'Memory Winner':^20} | {'Memory':^10} | {'Savings':^8}")
+    print("-" * 100)
     
     for result in analysis_results:
         size = result['Size']
-        method = result['Best_Method']
+        perf_method = result['Best_Perf_Method']
         time = result['Best_Time']
         vs_default = result['vs_Default']
         vs_trimul = result['vs_Trimul']
+        mem_method = result['Best_Mem_Method']
+        memory = result['Best_Memory']
+        savings = result['Mem_Savings']
         
-        # Add emoji indicators
-        if method == 'LayerNormOpt':
-            emoji = "🎯"
-        elif method == 'Trimul':
-            emoji = "⚡"
-        elif 'Trimul' in method:
-            emoji = "🔥"
-        elif method == 'Default':
-            emoji = "✅"
+        # Add emoji indicators for performance
+        if perf_method == 'LayerNormOpt':
+            perf_emoji = "🎯"
+        elif perf_method == 'TriAttn+Trimul':
+            perf_emoji = "🔥"
+        elif perf_method == 'Trimul':
+            perf_emoji = "⚡"
+        elif perf_method == 'Default':
+            perf_emoji = "✅"
         else:
-            emoji = "🚀"
+            perf_emoji = "🚀"
         
-        print(f"{emoji} Size {size:3d}: {method:15s} ({time}) | {vs_default:8s} vs Default | {vs_trimul:8s} vs Trimul")
+        # Add emoji indicators for memory
+        if mem_method == 'TriAttn+Trimul':
+            mem_emoji = "🔥"
+        elif mem_method == 'Trimul':
+            mem_emoji = "⚡"
+        elif 'Trimul' in mem_method:
+            mem_emoji = "💾"
+        else:
+            mem_emoji = "📦"
+        
+        print(f"{size:>4} | {perf_emoji}{perf_method:^19} | {time:^12} | {vs_default:^10} | {vs_trimul:^10} | {mem_emoji}{mem_method:^19} | {memory:^10} | {savings:^8}")
     
-    # Summary statistics
-    print(f"\n📈 SUMMARY STATISTICS")
-    print("-" * 40)
+    # Separate performance and memory winner analysis
+    print(f"\n🚀 PERFORMANCE SUMMARY")
+    print("-" * 50)
     
-    # Count wins per method
-    method_wins = {}
+    # Count performance wins per method
+    perf_method_wins = {}
     for result in analysis_results:
-        method = result['Best_Method']
-        method_wins[method] = method_wins.get(method, 0) + 1
+        method = result['Best_Perf_Method']
+        perf_method_wins[method] = perf_method_wins.get(method, 0) + 1
     
-    print("Winner frequency:")
-    for method, wins in sorted(method_wins.items(), key=lambda x: x[1], reverse=True):
+    print("Performance winner frequency:")
+    for method, wins in sorted(perf_method_wins.items(), key=lambda x: x[1], reverse=True):
         print(f"  • {method}: {wins}/{len(analysis_results)} sizes")
     
-    champion = max(method_wins, key=method_wins.get)
-    print(f"\n🏆 CHAMPION: {champion} (most frequent winner)")
+    perf_champion = max(perf_method_wins, key=perf_method_wins.get)
+    print(f"\n🏆 PERFORMANCE CHAMPION: {perf_champion}")
+    
+    print(f"\n💾 MEMORY SUMMARY")
+    print("-" * 50)
+    
+    # Count memory wins per method
+    mem_method_wins = {}
+    for result in analysis_results:
+        method = result['Best_Mem_Method']
+        mem_method_wins[method] = mem_method_wins.get(method, 0) + 1
+    
+    print("Memory winner frequency:")
+    for method, wins in sorted(mem_method_wins.items(), key=lambda x: x[1], reverse=True):
+        print(f"  • {method}: {wins}/{len(analysis_results)} sizes")
+    
+    mem_champion = max(mem_method_wins, key=mem_method_wins.get)
+    print(f"\n🏆 MEMORY CHAMPION: {mem_champion}")
     
     # Adaptive insights based on data
     small_results = [r for r in analysis_results if r['Size'] <= 128]
@@ -429,86 +485,117 @@ def analyze_triton_results(results_data=None):
     
     print(f"\n💡 KEY INSIGHTS")
     print("-" * 40)
+    print(f"\n📈 SUMMARY STATISTICS")
+    print("-" * 40)
     
     if small_results:
-        small_winners = [r['Best_Method'] for r in small_results]
-        if len(set(small_winners)) == 1:
-            print(f"• {small_winners[0]} dominates small sequences (≤128)")
+        small_perf_winners = [r['Best_Perf_Method'] for r in small_results]
+        small_mem_winners = [r['Best_Mem_Method'] for r in small_results]
+        if len(set(small_perf_winners)) == 1:
+            print(f"• {small_perf_winners[0]} dominates small sequence performance (≤128)")
         else:
-            print(f"• Mixed winners for small sequences: {set(small_winners)}")
+            print(f"• Mixed performance winners for small sequences: {set(small_perf_winners)}")
+        if len(set(small_mem_winners)) == 1:
+            print(f"• {small_mem_winners[0]} dominates small sequence memory (≤128)")
     
     if large_results:
-        large_winners = [r['Best_Method'] for r in large_results]
-        if len(set(large_winners)) == 1:
-            print(f"• {large_winners[0]} dominates large sequences (≥256)")
+        large_perf_winners = [r['Best_Perf_Method'] for r in large_results]
+        large_mem_winners = [r['Best_Mem_Method'] for r in large_results]
+        if len(set(large_perf_winners)) == 1:
+            print(f"• {large_perf_winners[0]} dominates large sequence performance (≥256)")
         else:
-            print(f"• Mixed winners for large sequences: {set(large_winners)}")
+            print(f"• Mixed performance winners for large sequences: {set(large_perf_winners)}")
+        if len(set(large_mem_winners)) == 1:
+            print(f"• {large_mem_winners[0]} dominates large sequence memory (≥256)")
     
     # Check our custom optimizations
     our_methods = ['HyperOptAttn', 'TurboOptAttn', 'LayerNormOpt', 'FusedAttn', 'FusedAttn+Trimul']
-    our_wins = [r for r in analysis_results if r['Best_Method'] in our_methods]
+    our_perf_wins = [r for r in analysis_results if r['Best_Perf_Method'] in our_methods]
+    our_mem_wins = [r for r in analysis_results if r['Best_Mem_Method'] in our_methods]
     
-    if our_wins:
-        print(f"• Our optimizations win {len(our_wins)}/{len(analysis_results)} tests")
+    if our_perf_wins:
+        print(f"• Our optimizations win {len(our_perf_wins)}/{len(analysis_results)} performance tests")
     else:
-        print("• Our custom optimizations show minimal improvement")
+        print("• Our custom optimizations show minimal performance improvement")
     
-    # Trimul analysis
-    trimul_wins = [r for r in analysis_results if r['Best_Method'] == 'Trimul']
-    if trimul_wins and 'Trimul' in methods:
+    if our_mem_wins:
+        print(f"• Our optimizations win {len(our_mem_wins)}/{len(analysis_results)} memory tests")
+    
+    # TriAttn+Trimul analysis
+    triattn_perf_wins = [r for r in analysis_results if r['Best_Perf_Method'] == 'TriAttn+Trimul']
+    if triattn_perf_wins and 'TriAttn+Trimul' in methods:
         speedups = []
-        for r in trimul_wins:
+        for r in triattn_perf_wins:
             try:
-                pct = float(r['vs_Default'].replace('%', '').replace('+', ''))
+                pct = float(r['vs_Trimul'].replace('%', '').replace('+', ''))
                 speedups.append(pct)
             except:
                 pass
         if speedups:
             avg_speedup = sum(speedups) / len(speedups)
-            print(f"• Trimul provides {avg_speedup:.1f}% average speedup where it wins")
+            print(f"• TriAttn+Trimul provides {avg_speedup:.1f}% average speedup vs Trimul where it wins")
     
     # Recommendations
     print(f"\n🎯 RECOMMENDATIONS")
     print("-" * 40)
     
     if small_results and large_results:
-        small_method = small_results[0]['Best_Method']
-        large_method = large_results[0]['Best_Method']
+        small_perf_method = small_results[0]['Best_Perf_Method']
+        large_perf_method = large_results[0]['Best_Perf_Method']
         
-        if small_method == large_method:
-            print(f"1. Use {small_method} for all sequence sizes")
+        if small_perf_method == large_perf_method:
+            print(f"1. Use {small_perf_method} for all sequence sizes (consistent winner)")
         else:
-            print(f"1. Use {small_method} for sequences < 128")
-            print(f"2. Use {large_method} for sequences ≥ 256")
+            print(f"1. Use {small_perf_method} for sequences < 128")
+            print(f"2. Use {large_perf_method} for sequences ≥ 256")
     
-    if not our_wins:
+    if not our_perf_wins:
         print("3. Focus future optimization on large sequence performance")
-        print("4. Consider cuEquivariance-based approaches instead of custom optimizations")
+        print("4. Consider cuEquivariance-based approaches (TriAttn+Trimul) instead of custom optimizations")
     
     print("5. Consider adaptive strategy based on sequence length")
+    print("6. Monitor memory usage for memory-constrained environments")
     
-    return df, analysis_results
+    return df, memory_df, analysis_results
 
 
 if __name__ == "__main__":
     print("Speed comparison: LayerNorm + Fused Attention Optimizations vs Trimul")
     
     # Run the standard benchmark
-    benchmark.run(print_data=True, show_plots=False)
+    results = benchmark.run(print_data=True, show_plots=False)
     
-    # You can provide actual benchmark results here:
-    # Example: to use your actual results, uncomment and modify:
-    actual_results = {
+    # Extract benchmark data from results
+    # Note: You'll need to adapt this to your actual benchmark output format
+    benchmark_results = {}
+    
+    # Run analysis only if we have results
+    if benchmark_results:
+        print("\nGenerating performance analysis...")
+        benchmark_df, memory_df, winner_analysis = analyze_triton_results(benchmark_results)
+    else:
+        print("\nNo benchmark results available for analysis. Please run benchmarks first.")
+    
+    # Example of how to add your own data manually:
+    """
+    # To manually provide benchmark data:
+    benchmark_results = {
         'size': [64.0, 128.0, 256.0, 512.0],
-        'Default': [0.010797, 0.011778, 0.084337, 0.482963],
-        'Trimul': [0.010742, 0.012808, 0.065764, 0.394785],
-        'HyperOptAttn': [0.010651, 0.011795, 0.084504, 0.483443],
-        'TurboOptAttn': [0.010886, 0.012336, 0.088742, 0.504486],
-        'LayerNormOpt': [0.010524, 0.011913, 0.084504, 0.483493],
-        'FusedAttn': [0.010579, 0.011935, 0.084572, 0.483654],
-        'FusedAttn+Trimul': [0.010612, 0.012929, 0.065931, 0.395125]
+        'Default': [...],
+        'Trimul': [...],
+        'TriAttn+Trimul': [...],
+        # etc...
     }
     
-    # Generate detailed performance analysis
-    print("\nGenerating performance analysis...")
-    benchmark_df, winner_analysis = analyze_triton_results(actual_results)
+    # To manually provide memory data:
+    memory_results = {
+        'size': [64.0, 128.0, 256.0, 512.0],
+        'Default': [...],  # MB
+        'Trimul': [...],
+        'TriAttn+Trimul': [...],
+        # etc...
+    }
+    
+    # Then run analysis with:
+    benchmark_df, memory_df, winner_analysis = analyze_triton_results(benchmark_results, memory_results)
+    """
