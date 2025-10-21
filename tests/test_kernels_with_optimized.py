@@ -559,43 +559,96 @@ def analyze_triton_results(results_data, memory_data=None):
     return df, memory_df, analysis_results
 
 
+def test_gradient_support():
+    """Test if all optimization methods support gradients properly."""
+    print("\n" + "="*80)
+    print("🧪 TESTING GRADIENT SUPPORT FOR EACH OPTIMIZATION METHOD")
+    print("="*80)
+    
+    # Setup test tensors
+    s = torch.randn((BATCH_SIZE, 64, C_S), device=device, requires_grad=True)
+    z = torch.randn((BATCH_SIZE, 64, 64, C_Z), device=device, requires_grad=True)
+    mask = torch.ones((BATCH_SIZE, 64), device=device, requires_grad=False).float()
+    pair_mask = torch.ones((BATCH_SIZE, 64, 64), device=device, requires_grad=False).float()
+    
+    configs = [
+        ("Default", False, False, False, False, False, False, False, False),
+        ("Trimul", True, False, False, False, False, False, False, False),
+        ("TriAttn+Trimul", True, True, False, False, False, False, False, False),
+        ("HyperOptAttn", False, False, True, False, False, False, False, False),
+        ("TurboOptAttn", False, False, False, True, False, False, False, False),
+        ("LayerNormOpt", False, False, False, False, True, False, False, False),
+        ("FusedAttn", False, False, False, False, False, True, False, False),
+        ("FusedAttn+Trimul", True, False, False, False, False, True, False, False),
+    ]
+    
+    results = []
+    
+    for name, use_cuequiv_mul, use_cuequiv_attn, use_opt_attn, use_turbo_attn, \
+        use_layernorm_attn, use_fused_attn, use_ultra_attn, use_minimal_attn in configs:
+        
+        s_test = s.clone().detach().requires_grad_(True)
+        z_test = z.clone().detach().requires_grad_(True)
+        
+        try:
+            # Forward and backward pass
+            s_out, z_out = backward(model, s_test, z_test, mask, pair_mask, 
+                                   use_cuequiv_mul, use_cuequiv_attn, use_opt_attn, 
+                                   use_turbo_attn, use_layernorm_attn, use_fused_attn,
+                                   use_ultra_attn, use_minimal_attn)
+            
+            # Create dummy loss and backprop
+            loss = s_out.sum() + z_out.sum()
+            loss.backward()
+            
+            # Check if gradients were computed
+            grad_s = s_test.grad is not None
+            grad_z = z_test.grad is not None
+            
+            status = "✅ PASS" if grad_s and grad_z else "❌ FAIL"
+            details = f"s_grad: {'Yes' if grad_s else 'No'}, z_grad: {'Yes' if grad_z else 'No'}"
+            results.append((name, status, details))
+            
+        except Exception as e:
+            results.append((name, "❌ ERROR", str(e)[:50]))
+    
+    # Print results table
+    print("\n{:<18} {:<10} {:<40}".format("Method", "Status", "Details"))
+    print("-" * 70)
+    for method, status, details in results:
+        print("{:<18} {:<10} {:<40}".format(method, status, details))
+    
+    # Check if any methods failed
+    failures = [r[0] for r in results if "PASS" not in r[1]]
+    if failures:
+        print(f"\n⚠️ WARNING: The following methods have gradient issues: {', '.join(failures)}")
+        print("These methods may not work properly with training.")
+    else:
+        print("\n✅ All optimization methods support gradients properly.")
+
+
 if __name__ == "__main__":
     print("Speed comparison: LayerNorm + Fused Attention Optimizations vs Trimul")
     
+    # First test gradient support
+    test_gradient_support()
+    
     # Run the standard benchmark
-    results = benchmark.run(print_data=True, show_plots=False)
+    benchmark.run(print_data=True, show_plots=False)
     
-    # Extract benchmark data from results
-    # Note: You'll need to adapt this to your actual benchmark output format
-    benchmark_results = {}
+    # Place for adding custom benchmark results
+    # Uncomment and fill with your data if needed
+    # results_data = {
+    #    'size': [64.0, 128.0, 256.0, 512.0],
+    #    'Default': [...],
+    #    ...
+    # }
     
-    # Run analysis only if we have results
-    if benchmark_results:
-        print("\nGenerating performance analysis...")
-        benchmark_df, memory_df, winner_analysis = analyze_triton_results(benchmark_results)
-    else:
-        print("\nNo benchmark results available for analysis. Please run benchmarks first.")
+    # memory_data = {
+    #    'size': [64.0, 128.0, 256.0, 512.0],
+    #    'Default': [...],
+    #    ...
+    # }
     
-    # Example of how to add your own data manually:
-    """
-    # To manually provide benchmark data:
-    benchmark_results = {
-        'size': [64.0, 128.0, 256.0, 512.0],
-        'Default': [...],
-        'Trimul': [...],
-        'TriAttn+Trimul': [...],
-        # etc...
-    }
-    
-    # To manually provide memory data:
-    memory_results = {
-        'size': [64.0, 128.0, 256.0, 512.0],
-        'Default': [...],  # MB
-        'Trimul': [...],
-        'TriAttn+Trimul': [...],
-        # etc...
-    }
-    
-    # Then run analysis with:
-    benchmark_df, memory_df, winner_analysis = analyze_triton_results(benchmark_results, memory_results)
-    """
+    # Only run analysis if data is provided
+    # analyze_triton_results(results_data, memory_data)
