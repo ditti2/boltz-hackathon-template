@@ -80,12 +80,11 @@ class OptimizedAttentionPairBias(nn.Module):
         # Pre-compute scaling factor
         self.scale = 1.0 / math.sqrt(self.head_dim)
         
-        # Optimized: Create combined QKV projection to reduce memory accesses
-        # This performs better than separate projections because it:
-        # 1. Reduces the number of kernel launches
-        # 2. Better memory access patterns
-        # 3. Potential for kernel fusion in PyTorch's compiler
-        self.proj_qkv = nn.Linear(c_s, 3 * c_s)
+        # Use separate projections to handle k_in parameter correctly
+        # Q comes from s, K and V come from k_in (which might be different from s)
+        self.proj_q = nn.Linear(c_s, c_s)
+        self.proj_k = nn.Linear(c_s, c_s, bias=False)
+        self.proj_v = nn.Linear(c_s, c_s, bias=False)
         self.proj_g = nn.Linear(c_s, c_s, bias=False)
         
         # Use optimized layernorm for z
@@ -196,6 +195,7 @@ class OptimizedAttentionPairBias(nn.Module):
         multiplicity: int = 1,
         to_keys=None,
         model_cache: Optional[Dict] = None,
+        k_in: Optional[torch.Tensor] = None,  # Added k_in parameter
     ) -> torch.Tensor:
         """
         Forward pass with optimized memory patterns.
@@ -226,24 +226,29 @@ class OptimizedAttentionPairBias(nn.Module):
         if self.initial_norm:
             s = self.norm_s(s)
             
-        # Handle key transformation if provided
-        if to_keys is not None:
+        # Handle key input - prioritize explicit k_in parameter
+        if k_in is not None:
+            # k_in was explicitly provided (e.g., from PairformerLayer)
+            pass  # Use the provided k_in
+        elif to_keys is not None:
+            # Transform keys using to_keys function
             k_in = to_keys(s)
-            mask_in = to_keys(mask.unsqueeze(-1)).squeeze(-1)
+            mask = to_keys(mask.unsqueeze(-1)).squeeze(-1)
         else:
+            # Default: use the input s as keys
             k_in = s
-            mask_in = mask
             
         # If cuEquivariance is available and the tensors are large enough
         # to benefit from it, use that implementation
         if HAS_CUEQUIVARIANCE and S >= 128:
-            return self._forward_cuequivariance(s, k_in, z, mask_in, multiplicity, model_cache)
+            return self._forward_cuequivariance(s, k_in, z, mask, multiplicity, model_cache)
         
         # Otherwise use our optimized PyTorch implementation
         
-        # 1. Project QKV in one operation for better memory access patterns
-        qkv = self.proj_qkv(s)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # 1. Project Q, K, V using correct input tensors
+        q = self.proj_q(s)  # Query from s
+        k = self.proj_k(k_in)  # Key from k_in  
+        v = self.proj_v(k_in)  # Value from k_in
         
         # 2. Reshape for attention computation
         q = q.view(B, S, self.num_heads, self.head_dim)
@@ -262,11 +267,11 @@ class OptimizedAttentionPairBias(nn.Module):
             q = q.repeat_interleave(multiplicity, 0)
             k = k.repeat_interleave(multiplicity, 0)
             v = v.repeat_interleave(multiplicity, 0)
-            mask_in = mask_in.repeat_interleave(multiplicity, 0)
+            mask = mask.repeat_interleave(multiplicity, 0)
             g = g.repeat_interleave(multiplicity, 0)
         
         # 6. Run memory-efficient attention
-        attn_output = self._memory_efficient_attention(q, k, v, z_bias, mask_in)
+        attn_output = self._memory_efficient_attention(q, k, v, z_bias, mask)
         
         # 7. Apply gating and output projection
         output = self.proj_o(g * attn_output)
