@@ -44,8 +44,8 @@ if HAS_OPTIMIZED:
     # Replace the attention module with optimized version
     if hasattr(opt_model, 'attention'):
         opt_model.attention = OptimizedAttentionPairBias(
-            opt_model.attention.token_s, 
-            opt_model.attention.token_z, 
+            opt_model.attention.c_s, 
+            opt_model.attention.c_z, 
             opt_model.attention.num_heads
         )
     opt_model.cuda()
